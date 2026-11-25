@@ -64,6 +64,8 @@ pub struct App {
     confirm_lines: Vec<String>,
     /// The cartridge being written is a GBA one (changes the wording of the confirmation).
     flow_gba: bool,
+    /// The ROM being written is for a Mega Drive cartridge (changes the confirmation text).
+    flow_md: bool,
     analysis: Option<Vec<String>>,
     analysis_scroll: usize,
     analysing: bool,
@@ -76,7 +78,7 @@ impl App {
             splash_since: None, last_scan: None, scanner: Box::new(readers::scan),
             lang, tab: Tab::Info, action_sel: 0, reader: None, cart: None, scanning: false, progress: None,
             banner: None, want_quit: false, dirty: true, tx, cancel, out_dir, flow: Flow::None,
-            picker_items: Vec::new(), confirm_lines: Vec::new(), flow_gba: false,
+            picker_items: Vec::new(), confirm_lines: Vec::new(), flow_gba: false, flow_md: false,
             analysis: None, analysis_scroll: 0, analysing: false,
         }
     }
@@ -312,9 +314,10 @@ impl App {
             return;
         };
         self.banner = None;
-        if action.writes() && self.system == System::MegaDrive {
+        let md = self.system == System::MegaDrive;
+        if md && action == Action::WriteSave {
             self.banner = Some((
-                (if fr { "Écriture Mega Drive : bientôt dans l'application" } else { "Mega Drive writing: coming soon" }).into(),
+                (if fr { "Sauvegarde Mega Drive : écriture pas encore gérée" } else { "Mega Drive save writing: not supported yet" }).into(),
                 true,
             ));
             return;
@@ -322,11 +325,13 @@ impl App {
         if action.writes() {
             let gba = cart.system == "GBA";
             let (exts, what): (&[&str], &str) = match action {
+                Action::FlashRom if md => (&["bin", "md", "gen"], "ROM"),
                 Action::FlashRom if gba => (&["gba"], "ROM"),
                 Action::FlashRom => (&["gb", "gbc"], "ROM"),
                 _ => (&["sav"], "sauvegarde"),
             };
             self.flow_gba = gba;
+            self.flow_md = md;
             let files = list_files(&self.out_dir, exts);
             if files.is_empty() {
                 self.banner = Some((
@@ -359,7 +364,7 @@ impl App {
             }
             (Flow::Picking { action, files, selected }, Key::Enter) => {
                 let file = files[selected].clone();
-                self.confirm_lines = confirm_text(action, &file, self.flow_gba);
+                self.confirm_lines = if self.flow_md { confirm_text_md(&file) } else { confirm_text(action, &file, self.flow_gba) };
                 Flow::Confirming { action, file }
             }
             (f @ Flow::Picking { .. }, _) => f,
@@ -723,7 +728,7 @@ mod tests {
     }
 
     #[test]
-    fn the_mega_drive_reads_its_cartridge_but_refuses_writing_for_now() {
+    fn the_mega_drive_reads_its_cartridge_and_writes_a_rom_after_a_confirmation() {
         let (mut a, rx) = fresh(vec![plugged(ReaderKind::KrikzzMd)]);
         down(&mut a, Key::Enter);
         for _ in 0..3 {
@@ -739,15 +744,34 @@ mod tests {
         a.on_event(Event::Detected(Ok((reader(), None))));
         assert_eq!(a.banner, Some(("Pas de cartouche Mega Drive reconnue (en-tête SEGA absent)".into(), true)));
         a.on_event(Event::Detected(Ok((reader(), Some(CartView { system: "Mega Drive", ..cart() })))));
-        // reading is offered, writing is refused before anything is asked
         down(&mut a, Key::Right);
         down(&mut a, Key::Enter);
         assert!(matches!(rx.try_recv().unwrap(), Cmd::ReadRom));
         a.on_event(Event::Finished(Ok("ROM lue".into())));
-        a.action_sel = 3; // flash a ROM
+        // saves cannot be written yet: refused before anything is asked
+        a.action_sel = 2;
         down(&mut a, Key::Enter);
-        assert!(rx.try_recv().is_err(), "nothing is sent for a write");
-        assert_eq!(a.banner, Some(("Écriture Mega Drive : bientôt dans l'application".into(), true)));
+        assert!(rx.try_recv().is_err(), "nothing is sent");
+        assert_eq!(a.banner, Some(("Sauvegarde Mega Drive : écriture pas encore gérée".into(), true)));
+        // flashing a ROM asks for a file (.bin/.md/.gen), then a confirmation on Y, then sends the command
+        let dir = std::env::temp_dir().join(format!("zerocart-md-app-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("jeu.bin"), vec![0u8; 0x600000]).unwrap(); // 6 MiB: the upper half is tested first
+        std::fs::write(dir.join("jeu.gba"), b"x").unwrap();
+        a.out_dir = dir.clone();
+        a.action_sel = 3;
+        down(&mut a, Key::Enter);
+        assert!(rx.try_recv().is_err(), "choosing a file sends nothing");
+        down(&mut a, Key::Enter); // the only .bin file
+        assert!(a.confirm_lines.iter().any(|l| l.contains("Mega Drive")));
+        assert!(a.confirm_lines.iter().any(|l| l.contains("4 Mo")), "{:?}", a.confirm_lines);
+        down(&mut a, Key::Enter);
+        assert!(rx.try_recv().is_err(), "Enter does not confirm a write");
+        down(&mut a, Key::Char('y'));
+        assert!(matches!(rx.try_recv().unwrap(), Cmd::FlashRom(p) if p.ends_with("jeu.bin")));
+        let _ = std::fs::remove_dir_all(&dir);
+        a.on_event(Event::Finished(Ok("ok".into())));
         down(&mut a, Key::Esc);
         down(&mut a, Key::Esc);
         assert!(matches!(rx.try_recv().unwrap(), Cmd::Disconnect));
@@ -1000,6 +1024,20 @@ pub fn list_files(dir: &std::path::Path, exts: &[&str]) -> Vec<PathBuf> {
 fn describe(p: &std::path::Path) -> String {
     let size = std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
     format!("{}  ({} Ko)", p.file_name().unwrap_or_default().to_string_lossy(), size / 1024)
+}
+
+fn confirm_text_md(file: &std::path::Path) -> Vec<String> {
+    let name = file.file_name().unwrap_or_default().to_string_lossy().into_owned();
+    let size = std::fs::metadata(file).map(|m| m.len()).unwrap_or(0);
+    let mut v = vec![
+        "ATTENTION : la ROM de la cartouche Mega Drive va être effacée (seuls les secteurs qui diffèrent)".to_string(),
+        format!("Écrire : {name} ({} Ko)", size / 1024),
+        "L'ancienne ROM est d'abord sauvegardée dans backups. Ne pas débrancher pendant l'écriture.".to_string(),
+    ];
+    if size > 4 << 20 {
+        v.push("Plus de 4 Mo : la moitié haute de la puce est testée avant d'écrire (refusée si inaccessible).".into());
+    }
+    v
 }
 
 fn confirm_text(action: Action, file: &std::path::Path, gba: bool) -> Vec<String> {

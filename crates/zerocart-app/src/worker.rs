@@ -49,6 +49,9 @@ pub enum Event {
 struct MdState {
     kit: zerocart_core::krikzz::FlashKit<SerialTransport>,
     header: Option<zerocart_core::megadrive::MdHeader>,
+    /// Whether the chip can be written above 0x400000: `None` until it was tested (the test is made when an image
+    /// that big is written), `Some(false)` on a cartridge wired as a 4 MiB one.
+    upper: Option<bool>,
 }
 
 /// What the worker knows about the inserted cartridge.
@@ -149,7 +152,7 @@ impl Worker {
                     md = None;
                     match self.md_connect() {
                         Ok((kit, view)) => {
-                            md = Some(MdState { kit, header: None });
+                            md = Some(MdState { kit, header: None, upper: None });
                             kind = Some(zerocart_core::ReaderKind::KrikzzMd);
                             let _ = tx.send(Event::Connected(Ok(view)));
                         }
@@ -264,9 +267,116 @@ impl Worker {
                 let r = self.md_analyze(md);
                 let _ = tx.send(Event::Analysis(r));
             }
-            _ => {
-                let _ = tx.send(Event::Finished(Err("Écriture Mega Drive : bientôt dans l'application (zerocart-md --flash en attendant)".into())));
+            Cmd::FlashRom(path) => {
+                let r = self.md_flash_rom(md, &path, tx);
+                // the cartridge changed (or the attempt may have): read its header again, then report
+                if let Ok(view) = self.md_detect(md) {
+                    let reader = ReaderView { name: "Krikzz FlashKit MD".into(), firmware: String::new(), voltage: "" };
+                    let _ = tx.send(Event::Detected(Ok((reader, view))));
+                }
+                let _ = tx.send(Event::Finished(r));
             }
+            _ => {
+                let _ = tx.send(Event::Finished(Err("Écriture de sauvegarde Mega Drive : pas encore gérée".into())));
+            }
+        }
+    }
+
+    /// Writes a ROM file to the flash cartridge: checks, backup of what is overwritten (two reads that must agree),
+    /// programming of the sectors that differ, then a full read back. From the programming on it cannot be cancelled.
+    fn md_flash_rom(&self, md: &mut MdState, path: &Path, tx: &Sender<Event>) -> Result<String, String> {
+        use zerocart_core::krikzz::UPPER_HALF;
+        let cancelled = |e: zerocart_core::Error| if matches!(e, zerocart_core::Error::Cancelled) { "annulé".to_string() } else { e.to_string() };
+        let image = std::fs::read(path).map_err(|e| e.to_string())?;
+        if image.len() < 0x200 || image.len() % 2 != 0 {
+            return Err("taille de fichier invalide pour une ROM Mega Drive".into());
+        }
+        let file_header = zerocart_core::megadrive::parse_header(&image).filter(|h| h.sega_ok);
+        let Some(file_header) = file_header else {
+            return Err("ce fichier n'est pas une ROM Mega Drive valide (en-tête SEGA absent ; les fichiers .smd entrelacés ne sont pas gérés)".into());
+        };
+        let geo = md
+            .kit
+            .read_geometry()
+            .map_err(|e| e.to_string())?
+            .ok_or("puce flash non reconnue (cartouche non réinscriptible) : rien n'est écrit")?;
+        if geo.command_set != 2 {
+            return Err("seules les puces AMD/Spansion sont gérées : rien n'est écrit".into());
+        }
+        if image.len() > geo.size_bytes {
+            return Err(format!("la ROM ({}) dépasse la puce ({})", size_label(image.len()), size_label(geo.size_bytes)));
+        }
+        // Above 4 MiB the chip is not always reachable: a standard cartridge is wired for 4 MiB only. Say so instead of
+        // failing half way (the test leaves the cartridge as it was).
+        if image.len() > UPPER_HALF {
+            let _ = tx.send(Event::Progress { label: "Test de la moitié haute de la puce".into(), done: 0, total: 0, kib_s: 0.0 });
+            let ok = md.kit.upper_half_writable(&geo).map_err(|e| e.to_string())?;
+            md.upper = Some(ok);
+            if !ok {
+                return Err(format!(
+                    "Cartouche limitée à 4 Mo : la moitié haute de la puce est inaccessible. ROM de {} refusée, rien n'est effacé",
+                    size_label(image.len())
+                ));
+            }
+        }
+        let extent = geo.extent(image.len());
+        let started = Instant::now();
+
+        // 1. Back up what will be overwritten: two reads that must agree.
+        let mut passes: Vec<Vec<u8>> = Vec::new();
+        for pass in 0..2usize {
+            let mut v = Vec::with_capacity(extent);
+            md.kit
+                .dump_rom(extent, &mut v, &mut |done| {
+                    let total = 2 * extent;
+                    let done = pass * extent + done;
+                    let kib_s = done as f32 / 1024.0 / started.elapsed().as_secs_f32().max(0.001);
+                    let _ = tx.send(Event::Progress { label: "Sauvegarde de la cartouche avant écriture".into(), done: done as u64, total: total as u64, kib_s });
+                    !self.cancel.load(Ordering::SeqCst)
+                })
+                .map_err(cancelled)?;
+            passes.push(v);
+        }
+        if passes[0] != passes[1] {
+            return Err("deux lectures de la cartouche diffèrent (mauvais contact ?) : rien n'est écrit".into());
+        }
+        let backups = self.out_dir.join("backups");
+        std::fs::create_dir_all(&backups).map_err(|e| e.to_string())?;
+        let title = if file_header.title().is_empty() { "megadrive".to_string() } else { sanitize(file_header.title()) };
+        let backup = unique_path(&backups, &format!("{title} avant flash"), "bin");
+        std::fs::write(&backup, &passes[0]).map_err(|e| e.to_string())?;
+        let name = backup.file_name().unwrap_or_default().to_string_lossy().into_owned();
+
+        // 2. Erase and program the sectors that differ. From here on it cannot be cancelled.
+        let t1 = Instant::now();
+        let mut on_progress = |msg: &str, done: usize, total: usize| {
+            let bytes: usize = geo.sectors.iter().take(done).map(|s| s.1 as usize).sum();
+            let _ = tx.send(Event::Progress {
+                label: format!("Écriture ({done}/{total}) ne pas débrancher : {msg}"),
+                done: done as u64,
+                total: total as u64,
+                kib_s: bytes as f32 / 1024.0 / t1.elapsed().as_secs_f32().max(0.001),
+            });
+        };
+        let report = md
+            .kit
+            .flash_rom(&geo, &image, &mut on_progress, &|| false)
+            .map_err(|e| format!("{e} ; ancienne ROM : backups/{name}"))?;
+
+        // 3. Read everything back.
+        let mut after = Vec::with_capacity(extent);
+        md.kit
+            .dump_rom(extent, &mut after, &mut |done| {
+                let _ = tx.send(Event::Progress { label: "Vérification de l'écriture".into(), done: done as u64, total: extent as u64, kib_s: 0.0 });
+                true
+            })
+            .map_err(|e| e.to_string())?;
+        let mut want = image.clone();
+        want.resize(extent, 0xFF);
+        if after == want {
+            Ok(format!("ROM écrite et vérifiée ({} secteurs réécrits, {} inchangés) ; ancienne ROM : backups/{name}", report.rewritten, report.unchanged))
+        } else {
+            Err(format!("ROM écrite mais la relecture diffère ; ancienne ROM : backups/{name}"))
         }
     }
 
@@ -358,6 +468,12 @@ impl Worker {
                 ));
                 if f.byte_wide {
                     lines.push("Deux puces 8 bits (cartouche de copie)".into());
+                }
+                match md.upper {
+                    Some(true) => lines.push("Au-delà de 4 Mo : accessible en écriture".into()),
+                    Some(false) => lines.push("!Au-delà de 4 Mo : inaccessible (cartouche câblée en 4 Mo)".into()),
+                    None if f.size_bytes > 4 << 20 => lines.push("Au-delà de 4 Mo : testé quand on écrit une ROM plus grande".into()),
+                    None => {}
                 }
                 if let Some(g) = md.kit.read_geometry().map_err(|e| e.to_string())? {
                     let mut runs: Vec<(u32, u32)> = Vec::new();
