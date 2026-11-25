@@ -174,3 +174,20 @@ l'envoi. Licence de ZeroSend : MIT, mention d'origine dans THIRD_PARTY.md. Tout 
 (3) la découverte multicast UDP (annonce et réponse) ; (4) l'envoi (client HTTPS avec certificat client, mTLS exigé par
 LocalSend 1.18+, empreinte du pair) ; (5) l'écran dans l'app : liste des appareils, acceptation sur Y/N, envoi d'un dump ou
 d'une sauvegarde avec confirmation ; (6) essai sur l'appareil avec l'application LocalSend d'un téléphone ou d'un PC.
+
+Étapes 2 à 4 faites (2026-11-26), toujours pas essayées sur l'appareil ni avec l'application LocalSend d'un téléphone :
+- `tls.rs` : serveur HTTPS (rustls, certificat de l'identité) et client TLS avec certificat client et vérification de
+  l'empreinte annoncée par le pair (un appareil ajouté à la main est accepté au premier contact).
+- `send.rs` : `register`, `prepare-upload` (l'autre utilisateur accepte ou refuse), `upload` fichier par fichier avec SHA-256,
+  annulation y compris pendant l'attente de l'autre utilisateur.
+- `discovery.rs` : annonces multicast UDP 224.0.0.167:53317, réponse par `register` (ou par multicast), liste des appareils
+  (un par adresse et port, jamais cet appareil), adresses réseau lues par `ip -j -4 addr show up`.
+- `service.rs` : tout ensemble (identité dans `~/.config/zerocart/send`, fichiers reçus dans `~/Downloads`, ajout par adresse).
+- Dans l'application : touche **S** à l'écran de choix du système (`crates/zerocart-app/src/share.rs`,
+  `crates/zerocart-ui/src/share_screen.rs`) : liste des appareils, choix d'un dump, d'une sauvegarde ou d'une sauvegarde
+  avant écriture (`~/zerocart` et `backups/`), confirmation sur Y, progression, annulation sur Esc ; une demande reçue
+  s'affiche avec Y pour accepter et N pour refuser ; A ajoute un appareil par adresse ; les messages texte s'affichent.
+  Le serveur et les annonces s'arrêtent quand on quitte l'écran.
+Reste : (5) l'essai réel avec l'application LocalSend (téléphone ou PC) et avec ZeroSend ; les textes sont à passer dans la
+table de traduction (français et anglais dans `share.rs` et `share_screen.rs`) ; la découverte multicast n'a été vue qu'en
+boucle locale dans les tests.

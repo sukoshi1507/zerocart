@@ -6,6 +6,7 @@ mod fb;
 mod readers;
 mod input;
 mod screenshot;
+mod share;
 mod worker;
 
 use app::App;
@@ -49,7 +50,40 @@ fn find_db(args: &[String]) -> PathBuf {
     "/usr/share/zerocart/configs".into()
 }
 
+/// Test aid: `--png out.png --share devices|none|files|confirm|input|sending|waiting|incoming|receiving` draws a sharing screen.
+fn demo_share(which: &str, out: &str, lang: Lang, fonts: &Fonts) -> Result<(), String> {
+    use zerocart_ui::share_screen::{render_share, ShareBody, ShareRow};
+    let mut canvas = Canvas::new(SCREEN_W, SCREEN_H, 0);
+    let mut p = Painter { canvas: &mut canvas, fonts };
+    let rows = vec![
+        ShareRow { name: "Pixel 8".into(), detail: "192.168.1.20  Pixel 8".into() },
+        ShareRow { name: "Portable de Laurent".into(), detail: "192.168.1.21  desktop".into() },
+    ];
+    let pr = zerocart_ui::ProgressView { label: "MEGA PANG.bin".into(), done: 600 * 1024, total: 1024 * 1024, kib_s: 0.0 };
+    let files: Vec<String> = ["MEGA PANG.bin  (1.0 Mo)", "Mr. Driller 2.gba  (4.0 Mo)", "backups/Mr. Driller 2 (non vérifiée).sav  (32 Ko)"].iter().map(|s| s.to_string()).collect();
+    let confirm = vec!["Envoyer ce fichier à Pixel 8 ?".to_string(), "MEGA PANG.bin (1.0 Mo)".to_string(), "Le fichier quitte l'appareil et passe par le réseau local.".to_string()];
+    let incoming = vec!["Pixel 8 veut vous envoyer :".to_string(), "rom.gba (4.0 Mo)".to_string(), "Enregistré dans ~/Downloads.".to_string()];
+    let none: &[ShareRow] = &[];
+    let body = match which {
+        "none" => ShareBody::Devices { rows: none, selected: 0, discovering: true, port: 53317, receiving: None },
+        "receiving" => ShareBody::Devices { rows: &rows, selected: 0, discovering: true, port: 53317, receiving: Some(&pr) },
+        "files" => ShareBody::Files { to: "Pixel 8", items: &files, selected: 1 },
+        "confirm" => ShareBody::Confirm { lines: &confirm },
+        "input" => ShareBody::Input { text: "100.64.0.7", busy: false },
+        "sending" => ShareBody::Sending { to: "Pixel 8", progress: &pr, waiting: false },
+        "waiting" => ShareBody::Sending { to: "Pixel 8", progress: &pr, waiting: true },
+        "incoming" => ShareBody::Incoming { lines: &incoming },
+        _ => ShareBody::Devices { rows: &rows, selected: 1, discovering: true, port: 53317, receiving: None },
+    };
+    render_share(&mut p, lang, "ZeroCart", &body, None);
+    screenshot::write_png(std::path::Path::new(out), &canvas.to_rgba(), SCREEN_W as u32, SCREEN_H as u32).map_err(|e| e.to_string())
+}
+
 fn demo_png(args: &[String], out: &str, lang: Lang, fonts: &Fonts) -> Result<(), String> {
+    if let Some(which) = arg(args, "--share") {
+        return demo_share(&which, out, lang, fonts);
+    }
+
     let tab = match arg(args, "--tab").as_deref() {
         Some("actions") => Tab::Actions,
         Some("tools") => Tab::Tools,

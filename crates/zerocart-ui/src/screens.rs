@@ -45,7 +45,12 @@ pub fn render_system(p: &mut Painter, lang: Lang, selected: usize, banner: Optio
         }
     }
     p.footer(
-        &[("Z C", if fr { "choisir" } else { "pick" }), ("Enter", if fr { "ok" } else { "ok" }), ("Esc", if fr { "quitter" } else { "quit" })],
+        &[
+            ("Z C", if fr { "choisir" } else { "pick" }),
+            ("Enter", if fr { "ok" } else { "ok" }),
+            ("S", if fr { "partager" } else { "share" }),
+            ("Esc", if fr { "quitter" } else { "quit" }),
+        ],
         banner,
     );
 }

@@ -13,6 +13,7 @@ path = "src/main.rs"
 zerocart-core = { path = "../zerocart-core" }
 zerocart-flashchips = { path = "../zerocart-flashchips" }
 zerocart-ui = { path = "../zerocart-ui" }
+zerocart-send = { path = "../zerocart-send" }
 png = "0.17"
 
 [dev-dependencies]

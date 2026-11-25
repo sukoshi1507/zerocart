@@ -9,6 +9,7 @@ pub mod font;
 pub mod icons;
 pub mod i18n;
 pub mod screens;
+pub mod share_screen;
 pub mod style;
 pub mod widgets;
 

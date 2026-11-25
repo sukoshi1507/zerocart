@@ -29,6 +29,8 @@ pub enum Stage {
     Readers,
     /// Cartridge / Actions / Tools
     Main,
+    /// File sharing (ZeroSend): reached from the system choice with S
+    Share,
 }
 
 const SPLASH_TIME: Duration = Duration::from_millis(1600);
@@ -46,6 +48,9 @@ pub struct App {
     splash_since: Option<Instant>,
     last_scan: Option<Instant>,
     scanner: Box<dyn FnMut() -> Vec<Detected>>,
+    /// The sharing screen, alive while it is open (the server and the discovery stop with it).
+    share: Option<crate::share::Share>,
+    share_starter: crate::share::Starter,
     pub lang: Lang,
     pub tab: Tab,
     pub action_sel: usize,
@@ -80,6 +85,7 @@ impl App {
             banner: None, want_quit: false, dirty: true, tx, cancel, out_dir, flow: Flow::None,
             picker_items: Vec::new(), confirm_lines: Vec::new(), flow_gba: false, flow_md: false,
             analysis: None, analysis_scroll: 0, analysing: false,
+            share: None, share_starter: crate::share::default_starter(),
         }
     }
 
@@ -126,6 +132,11 @@ impl App {
                 let since = *self.splash_since.get_or_insert(now);
                 if now.duration_since(since) >= SPLASH_TIME {
                     self.stage = Stage::System;
+                    self.dirty = true;
+                }
+            }
+            Stage::Share => {
+                if self.share.as_mut().is_some_and(|s| s.poll()) {
                     self.dirty = true;
                 }
             }
@@ -194,6 +205,35 @@ impl App {
             }
             Stage::System => self.want_quit = true,
             Stage::Splash => self.stage = Stage::System,
+            Stage::Share => {
+                self.share = None; // stops the server and the discovery
+                self.stage = Stage::System;
+            }
+        }
+    }
+
+    /// Opens the sharing screen: starts ZeroSend (the certificate, the server on 53317, the announcements).
+    fn open_share(&mut self) {
+        match crate::share::Share::start(&self.share_starter, self.out_dir.clone(), self.lang) {
+            Ok(s) => {
+                self.share = Some(s);
+                self.stage = Stage::Share;
+                self.banner = None;
+            }
+            Err(e) => self.banner = Some((e, true)),
+        }
+    }
+
+    /// Replaces the way ZeroSend is started (tests use a fake).
+    #[cfg(test)]
+    pub fn set_share_starter(&mut self, starter: crate::share::Starter) {
+        self.share_starter = starter;
+    }
+
+    fn share_key(&mut self, key: Key) {
+        let leave = self.share.as_mut().is_some_and(|s| s.on_key(key));
+        if leave {
+            self.back();
         }
     }
 
@@ -211,6 +251,7 @@ impl App {
                 self.reader_moved = false;
                 self.banner = None;
             }
+            (Stage::System, Key::Char('s' | 'S')) => self.open_share(),
             (Stage::System, Key::Esc) | (Stage::Readers, Key::Esc) => self.back(),
             (Stage::Readers, Key::Up) | (Stage::Readers, Key::Down) if !self.connecting => {
                 let n = self.reader_kinds().len().max(1);
@@ -257,8 +298,12 @@ impl App {
 
     pub fn on_routed(&mut self, r: Routed) {
         let Routed::Down(key) = r else { return };
-        let key = arrow_alias(key);
         self.dirty = true;
+        if self.stage == Stage::Share {
+            self.share_key(key); // the sharing screen has a text field: it decides itself what F, Z, X and C mean
+            return;
+        }
+        let key = arrow_alias(key);
         if self.stage != Stage::Main {
             self.start_key(key);
             return;
@@ -456,6 +501,11 @@ impl App {
             Stage::System => screens::render_system(p, self.lang, self.system_sel, banner),
             Stage::Readers => screens::render_readers(p, self.lang, self.system, &self.rows(), self.reader_sel, self.connecting, banner),
             Stage::Main => zerocart_ui::render(p, &self.view()),
+            Stage::Share => {
+                if let Some(s) = &self.share {
+                    s.render(p);
+                }
+            }
         }
     }
 
@@ -776,6 +826,68 @@ mod tests {
         down(&mut a, Key::Esc);
         assert!(matches!(rx.try_recv().unwrap(), Cmd::Disconnect));
         assert_eq!(a.stage, Stage::System);
+    }
+
+    /// A ZeroSend that does nothing: no network in the tests.
+    struct Quiet;
+    impl crate::share::Backend for Quiet {
+        fn alias(&self) -> String {
+            "ZeroCart".into()
+        }
+        fn port(&self) -> u16 {
+            53317
+        }
+        fn discovering(&self) -> bool {
+            true
+        }
+        fn peers(&self) -> Vec<zerocart_send::send::Peer> {
+            vec![]
+        }
+        fn rescan(&self) {}
+        fn add_manual(&self, _: &str) -> Result<zerocart_send::send::Peer, String> {
+            Err("non".into())
+        }
+        fn send(
+            &self,
+            _: &zerocart_send::send::Peer,
+            _: Vec<zerocart_send::send::Outgoing>,
+            _: &mut dyn FnMut(zerocart_send::send::SendEvent),
+            _: &zerocart_send::send::Cancel,
+        ) -> Result<zerocart_send::send::Outcome, String> {
+            Err("non".into())
+        }
+    }
+
+    #[test]
+    fn s_opens_the_sharing_screen_from_the_systems_and_esc_comes_back_and_stops_it() {
+        let (mut a, _rx) = fresh(vec![]);
+        a.set_share_starter(Box::new(|_, _| Ok(Arc::new(Quiet) as Arc<dyn crate::share::Backend>)));
+        down(&mut a, Key::Esc); // the splash is skipped by a key
+        assert_eq!(a.stage, Stage::System);
+        down(&mut a, Key::Char('s'));
+        assert_eq!(a.stage, Stage::Share);
+        assert!(a.share.is_some());
+        // inside, F is not an arrow: typing an address keeps the letters
+        down(&mut a, Key::Char('a'));
+        for c in "fzxc".chars() {
+            down(&mut a, Key::Char(c));
+        }
+        down(&mut a, Key::Esc); // closes the text field
+        assert_eq!(a.stage, Stage::Share, "Esc leaves the text field, not the screen");
+        down(&mut a, Key::Esc);
+        assert_eq!(a.stage, Stage::System);
+        assert!(a.share.is_none(), "leaving stops ZeroSend");
+        assert!(!a.want_quit);
+    }
+
+    #[test]
+    fn a_zerosend_that_cannot_start_says_why_and_stays_on_the_systems() {
+        let (mut a, _rx) = fresh(vec![]);
+        a.set_share_starter(Box::new(|_, _| Err("port 53317 occupé".into())));
+        down(&mut a, Key::Esc);
+        down(&mut a, Key::Char('S'));
+        assert_eq!(a.stage, Stage::System);
+        assert_eq!(a.banner, Some(("port 53317 occupé".to_string(), true)));
     }
 
     #[test]
