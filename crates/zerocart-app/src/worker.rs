@@ -538,6 +538,18 @@ impl Worker {
             None => Dev::open()?,
         };
         let mode = if dmg { CartMode::Dmg } else { CartMode::Agb };
+        // A reader that sets the voltage must never put 5 V on a GBA cartridge: when the user chose a Game Boy, look
+        // first at 3.3 V whether the cartridge has a valid GBA header, and if so do not go to 5 V.
+        if dmg && !d.r().info(CartMode::Dmg).voltage.is_empty() {
+            if let Ok(h) = d.r().read_header(CartMode::Agb) {
+                if gba_cart_inside(&h) {
+                    let info = d.r().info(CartMode::Agb);
+                    let reader = ReaderView { name: info.name, firmware: info.firmware, voltage: info.voltage };
+                    *dev = Some(d);
+                    return Ok((reader, None));
+                }
+            }
+        }
         let header = d.r().read_header(mode).map_err(|e| e.to_string())?;
         let info = d.r().info(mode);
         let reader = ReaderView { name: info.name, firmware: info.firmware, voltage: info.voltage };
@@ -736,6 +748,12 @@ impl Worker {
     }
 }
 
+/// A header read at 3.3 V that is a valid GBA header (fixed byte and complement checksum): a Game Boy cartridge
+/// read this way gives junk, which almost never passes both checks.
+pub fn gba_cart_inside(header: &[u8]) -> bool {
+    parse_agb(header).is_some_and(|h| h.logo_ok && h.header_checksum_ok)
+}
+
 /// Reads the whole save (Game Boy RAM through the mapper, or GBA SRAM). `progress(done)` returns false to cancel.
 fn read_save_data(d: &mut Dev, mapper: Option<DmgMapper>, size: usize, progress: &mut dyn FnMut(usize) -> bool) -> Result<Vec<u8>, String> {
     let fail = |e: zerocart_core::Error| if matches!(e, zerocart_core::Error::Cancelled) { "annulé".to_string() } else { e.to_string() };
@@ -812,5 +830,37 @@ mod tests {
         let a = unique_path(d.path(), "Game", "gba");
         std::fs::write(&a, b"x").unwrap();
         assert_eq!(unique_path(d.path(), "Game", "gba").file_name().unwrap(), "Game (2).gba");
+    }
+}
+
+#[cfg(test)]
+mod guard_tests {
+    use super::*;
+
+    fn gba_header() -> Vec<u8> {
+        let mut h = vec![0u8; 0x180];
+        h[0xA0..0xA8].copy_from_slice(b"TESTGAME");
+        h[0xB2] = 0x96;
+        let sum = h[0xA0..=0xBC].iter().fold(0u8, |a, &b| a.wrapping_sub(b)).wrapping_sub(0x19);
+        h[0xBD] = sum;
+        h
+    }
+
+    #[test]
+    fn a_valid_gba_header_is_recognised_so_that_5_v_is_not_applied() {
+        assert!(gba_cart_inside(&gba_header()));
+    }
+
+    #[test]
+    fn junk_and_game_boy_data_read_at_3_3_v_are_not_taken_for_a_gba_cartridge() {
+        assert!(!gba_cart_inside(&vec![0xFF; 0x180]));
+        assert!(!gba_cart_inside(&vec![0u8; 0x180]));
+        let mut half = gba_header();
+        half[0xBD] ^= 1; // fixed byte right, checksum wrong
+        assert!(!gba_cart_inside(&half));
+        let mut other = gba_header();
+        other[0xB2] = 0x00; // checksum right for the old bytes, fixed byte wrong
+        assert!(!gba_cart_inside(&other));
+        assert!(!gba_cart_inside(&[1, 2, 3]), "a short read is not a header");
     }
 }

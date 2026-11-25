@@ -45,7 +45,7 @@ pub fn render_system(p: &mut Painter, lang: Lang, selected: usize, banner: Optio
         }
     }
     p.footer(
-        &[("←→", if fr { "choisir" } else { "pick" }), ("Enter", if fr { "ok" } else { "ok" }), ("Esc", if fr { "quitter" } else { "quit" })],
+        &[("Z C", if fr { "choisir" } else { "pick" }), ("Enter", if fr { "ok" } else { "ok" }), ("Esc", if fr { "quitter" } else { "quit" })],
         banner,
     );
 }
@@ -97,7 +97,7 @@ pub fn render_readers(p: &mut Painter, lang: Lang, system: System, rows: &[Reade
         p.text_right(&r.detail, 8, false, DIM, 16, y + 13);
     }
     let hints: &[(&str, &str)] = &[
-        ("↑↓", if fr { "choisir" } else { "pick" }),
+        ("F X", if fr { "choisir" } else { "pick" }),
         ("Enter", if fr { "confirmer" } else { "confirm" }),
         ("Esc", if fr { "retour" } else { "back" }),
     ];

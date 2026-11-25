@@ -21,7 +21,7 @@ with a 320x170 Famicom-style interface driven by the keyboard.
 
 Everything that changes a cartridge asks for a file, then for a confirmation with `Y`; before writing, the whole
 ROM chip (or the current save) is backed up to `~/zerocart/backups` from two reads that must agree, and the result is
-read back and compared. The 3.3 V GBA mode is the default; the Game Boy 5 V mode needs the explicit `G` key.
+read back and compared. The system chosen on the first screen sets the mode and the voltage (Game Boy and Game Boy Color 5 V, Game Boy Advance 3.3 V), and when Game Boy is chosen on a reader that sets the voltage, ZeroCart first looks at 3.3 V whether the cartridge is a Game Boy Advance one, and then does not go to 5 V.
 
 Not handled yet: other Game Boy mappers, flash chips with buffered writes or other command sets (they are refused,
 not guessed), GBxCart-specific firmware features, the e-Reader and the Pocket Camera.
@@ -33,10 +33,10 @@ in `~/zerocart`; dumps are written there too.
 
 | Key | |
 |---|---|
-| Left / Right | tab (Cartridge, Actions, Tools) |
-| Up / Down, Enter | choose, run |
-| `R` | read the cartridge again |
-| `G` | Game Boy mode (5 V) |
+| `Z` / `C` (or Fn + arrows) | left / right: choose the system, change tab |
+| `F` / `X` (or Fn + arrows) | up / down: choose a reader, an action, a file |
+| Enter | confirm the choice, run |
+| `R` | read the cartridge again (after swapping it) |
 | `Y` | confirm a write |
 | Esc | cancel (only before the writing starts), quit |
 

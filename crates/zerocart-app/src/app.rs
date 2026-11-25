@@ -257,6 +257,7 @@ impl App {
 
     pub fn on_routed(&mut self, r: Routed) {
         let Routed::Down(key) = r else { return };
+        let key = arrow_alias(key);
         self.dirty = true;
         if self.stage != Stage::Main {
             self.start_key(key);
@@ -747,6 +748,59 @@ mod tests {
     }
 
     #[test]
+    fn f_z_x_c_are_up_left_down_right_without_the_fn_key() {
+        assert_eq!(
+            ['f', 'z', 'x', 'c', 'F', 'Z', 'X', 'C'].map(|c| arrow_alias(Key::Char(c))),
+            [Key::Up, Key::Left, Key::Down, Key::Right, Key::Up, Key::Left, Key::Down, Key::Right]
+        );
+        for k in [Key::Up, Key::Enter, Key::Esc, Key::Char('r'), Key::Char('y'), Key::Char('g')] {
+            assert_eq!(arrow_alias(k), k, "other keys are left alone");
+        }
+    }
+
+    #[test]
+    fn the_letters_drive_the_start_screens_and_the_tabs_like_the_arrows() {
+        let (mut a, _rx) = fresh(vec![]);
+        down(&mut a, Key::Char('x')); // any key ends the splash
+        assert_eq!(a.stage, Stage::System);
+        down(&mut a, Key::Char('c')); // right: Game Boy Color
+        down(&mut a, Key::Char('c')); // right: Game Boy Advance
+        down(&mut a, Key::Char('z')); // left: back to Game Boy Color
+        down(&mut a, Key::Enter);
+        assert_eq!((a.stage, a.system), (Stage::Readers, System::Gbc));
+        let (mut b, rx) = app();
+        rx.try_recv().unwrap();
+        b.on_event(Event::Detected(Ok((reader(), Some(cart())))));
+        down(&mut b, Key::Char('c')); // right: Actions tab
+        assert_eq!(b.tab, Tab::Actions);
+        down(&mut b, Key::Char('x')); // down: second action
+        assert_eq!(b.action_sel, 1);
+        down(&mut b, Key::Char('f')); // up
+        assert_eq!(b.action_sel, 0);
+        down(&mut b, Key::Char('z')); // left: Cartridge tab
+        assert_eq!(b.tab, Tab::Info);
+    }
+
+    #[test]
+    fn the_file_picker_is_driven_by_the_letters_too_but_confirmation_stays_on_y() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("a.sav"), vec![0u8; 16]).unwrap();
+        std::fs::write(d.path().join("b.sav"), vec![0u8; 16]).unwrap();
+        let (mut a, rx) = app_in(d.path());
+        a.action_sel = 2; // write save
+        down(&mut a, Key::Enter);
+        down(&mut a, Key::Char('x')); // down to b.sav
+        down(&mut a, Key::Enter);
+        down(&mut a, Key::Char('c')); // right is not a confirmation
+        assert!(rx.try_recv().is_err());
+        down(&mut a, Key::Char('y'));
+        match rx.try_recv().unwrap() {
+            Cmd::WriteSave(p) => assert!(p.ends_with("b.sav")),
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
     fn start_with_skips_the_start_screens() {
         let (mut a, rx) = fresh(vec![]);
         a.start_with(ReaderKind::GbxCart, System::Gbc);
@@ -909,6 +963,18 @@ mod tests {
         assert!(!a.want_quit);
         down(&mut a, Key::Esc);
         assert!(a.want_quit);
+    }
+}
+
+/// The cardputer's arrows need the Fn key, which is awkward: F, Z, X and C (an inverted T: F above, Z X C below) are
+/// taken as up, left, down and right everywhere. The application has no text entry, so no letter is lost.
+pub fn arrow_alias(key: Key) -> Key {
+    match key {
+        Key::Char('f' | 'F') => Key::Up,
+        Key::Char('z' | 'Z') => Key::Left,
+        Key::Char('x' | 'X') => Key::Down,
+        Key::Char('c' | 'C') => Key::Right,
+        other => other,
     }
 }
 

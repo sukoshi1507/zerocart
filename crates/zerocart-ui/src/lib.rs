@@ -168,19 +168,19 @@ pub fn render(p: &mut Painter, v: &View) {
     let hints: Vec<(&str, &str)> = match (v.tab, v.progress.is_some()) {
         (_, true) => vec![("Esc", if fr { "annuler" } else { "cancel" })],
         (Tab::Tools, _) => vec![
-            ("←→", if fr { "onglet" } else { "tab" }),
+            ("Z C", if fr { "onglet" } else { "tab" }),
             ("Enter", if fr { "analyser" } else { "analyse" }),
-            ("↑↓", if fr { "défiler" } else { "scroll" }),
+            ("F X", if fr { "défiler" } else { "scroll" }),
             ("Esc", if fr { "quitter" } else { "quit" }),
         ],
         (Tab::Actions, _) => vec![
-            ("←→", if fr { "onglet" } else { "tab" }),
-            ("↑↓", if fr { "choisir" } else { "pick" }),
+            ("Z C", if fr { "onglet" } else { "tab" }),
+            ("F X", if fr { "choisir" } else { "pick" }),
             ("Enter", if fr { "lancer" } else { "run" }),
             ("Esc", if fr { "quitter" } else { "quit" }),
         ],
         _ => vec![
-            ("←→", if fr { "onglet" } else { "tab" }),
+            ("Z C", if fr { "onglet" } else { "tab" }),
             ("R", match (v.reader.is_some_and(|r| r.voltage.is_empty()), fr) {
                 (true, true) => "lire GBA",
                 (true, false) => "read GBA",
@@ -248,7 +248,7 @@ fn overlay(p: &mut Painter, v: &View, o: &Overlay) {
                 }
                 p.text(item, 11, sel, if sel { TEXT } else { DIM }, 26, y + 2, Some(SCREEN_W - 44));
             }
-            p.footer(&[("↑↓", if fr { "choisir" } else { "pick" }), ("Enter", if fr { "ok" } else { "ok" }), ("Esc", if fr { "retour" } else { "back" })], v.banner);
+            p.footer(&[("F X", if fr { "choisir" } else { "pick" }), ("Enter", if fr { "ok" } else { "ok" }), ("Esc", if fr { "retour" } else { "back" })], v.banner);
         }
         Overlay::Confirm { lines } => {
             let mut y = 47;
