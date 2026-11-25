@@ -45,6 +45,12 @@ Mega Pang (RCampeador, itch.io). La checksum de l'en-tête de cette ROM (0x2AAF)
 l'en-tête du homebrew, pas un défaut du lecteur. Dans l'application, la comparaison avec l'en-tête sera donc un
 AVERTISSEMENT et non une erreur, et le CRC32 reste la preuve de lecture.
 
+Écriture VALIDÉE sur la carte (2026-11-25), cartouche flash de l'utilisateur (puce Spansion S29GL064N, 8 Mio, 135 secteurs :
+8 de 8 Kio puis des 64 Kio, CFI et autoselect `0001:227E/2210/2200`) : `zerocart-md --flash` avec sauvegarde à double
+lecture, effacement par secteur d'après la CFI, programmation mot par mot en « unlock bypass », relecture. Deux secteurs
+réécrits en 4,5 s ; réécriture complète des 23 secteurs de 1 Mio en 43 s (~24 Kio/s) ; ROM d'origine restaurée et
+vérifiée par un dump indépendant (même SHA-1). Seuls les secteurs qui diffèrent sont effacés.
+
 Côté lecture, le protocole est écrit et testé contre un simulateur (2026-11-25), PAS encore branché dans l'application
 ni essayé sur la carte : `zerocart-core/src/krikzz.rs` (`FlashKit<T>` : poignée de main, lecture de mots et de blocs,
 en-tête, dump de ROM avec CRC-32 et checksum Mega Drive, lecture de la sauvegarde par le registre 0xA13000,

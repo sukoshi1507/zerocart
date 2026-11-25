@@ -161,17 +161,6 @@ fn run() -> Result<(), String> {
     Ok(())
 }
 
-/// Reads `len` bytes of the cartridge twice; the two reads must agree.
-fn read_stable<T: zerocart_core::Transport>(kit: &mut FlashKit<T>, len: usize) -> Result<Vec<u8>, String> {
-    let a = kit.read(0, len).map_err(|e| e.to_string())?;
-    let b = kit.read(0, len).map_err(|e| e.to_string())?;
-    if a != b {
-        let n = a.iter().zip(&b).filter(|(x, y)| x != y).count();
-        return Err(format!("two reads of the cartridge differ ({n} bytes): refusing to write"));
-    }
-    Ok(a)
-}
-
 fn flash_cartridge<T: zerocart_core::Transport>(
     kit: &mut FlashKit<T>,
     h: &MdHeader,
@@ -195,8 +184,8 @@ fn flash_cartridge<T: zerocart_core::Transport>(
     if image.is_empty() || image.len() % 2 != 0 || image.len() > geo.size_bytes {
         return Err(format!("the file is {} bytes: it must be even and fit the {} bytes of the chip", image.len(), geo.size_bytes));
     }
-    let used: Vec<(u32, u32)> = geo.sectors.iter().copied().filter(|s| (s.0 as usize) < image.len()).collect();
-    let extent = used.last().map(|s| (s.0 + s.1) as usize).ok_or("no sector")?;
+    let used = geo.used_sectors(image.len());
+    let extent = geo.extent(image.len());
     println!("file: {file}, {} bytes; it covers {} sector(s), {} KiB of the chip", image.len(), used.len(), extent / 1024);
     if !megadrive::parse_header(&image).is_some_and(|f| f.is_valid()) {
         println!("  warning: the file has no valid Mega Drive header");
@@ -204,7 +193,7 @@ fn flash_cartridge<T: zerocart_core::Transport>(
     println!("cartridge now: {} ({})", h.title(), if h.is_valid() { "valid header" } else { "no valid header" });
 
     println!("reading the {} KiB that will be overwritten, twice, for the backup...", extent / 1024);
-    let current = read_stable(kit, extent)?;
+    let current = kit.read_stable(extent).map_err(|e| format!("{e}: refusing to write"))?;
     std::fs::write(&backup, &current).map_err(|e| e.to_string())?;
     println!("backup written: {backup} (CRC32 {:08x})", zerocart_core::db::crc32(&current));
     let mut want = image.clone();

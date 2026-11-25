@@ -97,6 +97,19 @@ pub struct FlashGeometry {
     pub sectors: Vec<(u32, u32)>,
 }
 
+impl FlashGeometry {
+    /// The sectors an image of `image_len` bytes touches (those that start inside it).
+    pub fn used_sectors(&self, image_len: usize) -> Vec<(u32, u32)> {
+        self.sectors.iter().copied().filter(|s| (s.0 as usize) < image_len).collect()
+    }
+
+    /// Bytes from offset 0 to the end of the last sector an image of `image_len` bytes touches: what gets overwritten,
+    /// so what a backup must hold.
+    pub fn extent(&self, image_len: usize) -> usize {
+        self.used_sectors(image_len).last().map_or(0, |s| (s.0 + s.1) as usize)
+    }
+}
+
 /// What [`FlashKit::flash_rom`] did.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct FlashReport {
@@ -196,6 +209,19 @@ impl<T: Transport> FlashKit<T> {
             done += n;
         }
         Ok(out)
+    }
+
+    /// Reads `len` bytes from offset 0 twice; the two reads must agree (else an I/O error: a flaky contact). This is
+    /// the read to use for a backup.
+    pub fn read_stable(&mut self, len: usize) -> Result<Vec<u8>> {
+        self.set_delay(1)?;
+        self.write_word(BANK_REGISTER, 0x0000)?;
+        let a = self.read(0, len)?;
+        let b = self.read(0, len)?;
+        if a != b {
+            return Err(invalid("two reads of the cartridge differ: bad contact or a cartridge that is not stable"));
+        }
+        Ok(a)
     }
 
     /// The first 512 bytes of the cartridge (header), with the ROM mapped in.
@@ -422,7 +448,7 @@ impl<T: Transport> FlashKit<T> {
         if image.is_empty() || image.len() % 2 != 0 || image.len() > geometry.size_bytes {
             return Err(invalid("the image is empty, odd, or larger than the flash chip: nothing is erased"));
         }
-        let used: Vec<(u32, u32)> = geometry.sectors.iter().copied().filter(|s| (s.0 as usize) < image.len()).collect();
+        let used = geometry.used_sectors(image.len());
         let target = |off: u32, size: u32| -> Vec<u8> {
             let (o, e) = (off as usize, (off as usize + size as usize).min(image.len()));
             let mut t = image[o..e].to_vec();
@@ -924,6 +950,19 @@ mod tests {
         assert_eq!(g.sectors, (0..8).map(|i| (i * 0x10000, 0x10000)).collect::<Vec<_>>());
         assert_eq!(k.into_inner().chip, Chip::Array, "left in read-array mode");
         assert_eq!(kit(game()).read_geometry().unwrap(), None);
+    }
+
+    #[test]
+    fn the_extent_of_an_image_is_the_end_of_its_last_sector_and_a_backup_reads_it_twice() {
+        let mut k = flash_kit();
+        let g = k.read_geometry().unwrap().unwrap();
+        assert_eq!(g.used_sectors(0x28000), vec![(0, 0x10000), (0x10000, 0x10000), (0x20000, 0x10000)]);
+        assert_eq!(g.extent(0x28000), 0x30000);
+        assert_eq!(g.extent(0x30000), 0x30000);
+        assert_eq!(g.extent(0x30002), 0x40000);
+        assert_eq!(g.extent(0), 0);
+        let held = k.read_stable(g.extent(0x28000)).unwrap();
+        assert_eq!(held, game()[..0x30000]);
     }
 
     #[test]
