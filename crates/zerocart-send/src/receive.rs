@@ -13,6 +13,7 @@ use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 /// What the application provides: the decision of the user and the display of what happens.
 pub trait Ui: Send + Sync {
@@ -35,7 +36,13 @@ struct Session {
     files: HashMap<String, FileMeta>,
     left: HashSet<String>,
     ended: bool,
+    /// The last sign of life of the sender (a request or a chunk of data).
+    last_activity: Instant,
 }
+
+/// A transfer that shows no sign of life for this long is considered abandoned (the sender crashed or left the
+/// network), so that the receiver does not stay "busy" for ever.
+pub const SESSION_IDLE: Duration = Duration::from_secs(120);
 
 pub struct Receiver<U: Ui> {
     /// This device, for the `info` and `register` answers (with the port and protocol only where LocalSend wants them).
@@ -44,6 +51,7 @@ pub struct Receiver<U: Ui> {
     downloads: PathBuf,
     ui: U,
     session: Mutex<Option<Session>>,
+    session_idle: Duration,
 }
 
 /// A received file name as a path inside the download folder: folders are kept, `..` and control characters are not.
@@ -106,8 +114,15 @@ fn hex(bytes: &[u8]) -> String {
 }
 
 impl<U: Ui> Receiver<U> {
+    /// Changes how long a silent transfer keeps the receiver busy (tests).
+    #[cfg(test)]
+    fn with_session_idle(mut self, idle: Duration) -> Self {
+        self.session_idle = idle;
+        self
+    }
+
     pub fn new(alias: &str, fingerprint: &str, downloads: PathBuf, ui: U) -> Self {
-        Self { alias: alias.to_string(), fingerprint: fingerprint.to_string(), downloads, ui, session: Mutex::new(None) }
+        Self { alias: alias.to_string(), fingerprint: fingerprint.to_string(), downloads, ui, session: Mutex::new(None), session_idle: SESSION_IDLE }
     }
 
     fn info(&self) -> Value {
@@ -176,7 +191,7 @@ impl<U: Ui> Receiver<U> {
         }
         {
             let s = self.session.lock().unwrap();
-            if s.as_ref().is_some_and(|s| !s.ended) {
+            if s.as_ref().is_some_and(|s| !s.ended && s.last_activity.elapsed() < self.session_idle) {
                 return Ok((409, None)); // busy with another transfer
             }
         }
@@ -196,6 +211,7 @@ impl<U: Ui> Receiver<U> {
             files: request.files.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
             left: request.files.keys().cloned().collect(),
             ended: false,
+            last_activity: Instant::now(),
         });
         let answer = PrepareUploadResponse { session_id, files: tokens };
         Ok((200, Some(serde_json::to_value(answer).map_err(io::Error::other)?)))
@@ -213,7 +229,9 @@ impl<U: Ui> Receiver<U> {
             if session.ended {
                 return Ok((409, None));
             }
-            session.files[q("fileId")].clone()
+            let mut session = s;
+            session.as_mut().unwrap().last_activity = Instant::now();
+            session.as_ref().unwrap().files[q("fileId")].clone()
         };
         let relative = safe_relative(&meta.file_name);
         let target = self.downloads.join(&relative);
@@ -243,6 +261,9 @@ impl<U: Ui> Receiver<U> {
                     h.update(&buf[..n]);
                 }
                 self.ui.progress(&meta.file_name, received, meta.size);
+                if let Some(s) = self.session.lock().unwrap().as_mut() {
+                    s.last_activity = Instant::now(); // a long file is not an abandoned one
+                }
             }
             out.flush()
         })();
@@ -604,6 +625,23 @@ mod tests {
         names.dedup();
         assert_eq!(names.len(), 12, "every claim got its own name");
         assert!(names.iter().all(|n| n.exists()));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_sender_that_vanished_does_not_keep_the_receiver_busy_for_ever() {
+        let d = dir("idle");
+        let log = Arc::new(M::new(Log::default()));
+        let r = Receiver::new("ZeroCart", "FINGER", d.clone(), FakeUi { accept: true, log }).with_session_idle(Duration::from_millis(80));
+        let first = run(&r, vec![post("/api/localsend/v2/prepare-upload", &prepare_body(&[("f1", "a.bin", 1, None)]))]);
+        assert_eq!(first[0].0, 200);
+        // the sender never uploads: while it is recent the receiver is busy...
+        let busy = run(&r, vec![post("/api/localsend/v2/prepare-upload", &prepare_body(&[("g1", "b.bin", 1, None)]))]);
+        assert_eq!(busy[0].0, 409);
+        // ...and after the idle time it is free again
+        std::thread::sleep(Duration::from_millis(150));
+        let free = run(&r, vec![post("/api/localsend/v2/prepare-upload", &prepare_body(&[("g1", "b.bin", 1, None)]))]);
+        assert_eq!(free[0].0, 200, "an abandoned session is dropped");
         let _ = std::fs::remove_dir_all(&d);
     }
 
