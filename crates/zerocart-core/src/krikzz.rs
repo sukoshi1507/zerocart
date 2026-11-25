@@ -130,6 +130,8 @@ pub const READY_TIMEOUT: Duration = Duration::from_secs(60);
 
 pub struct FlashKit<T: Transport> {
     t: T,
+    /// Program with the chip's write buffer instead of word by word (see [`FlashKit::set_buffered`]).
+    buffered: bool,
 }
 
 impl<T: Transport> FlashKit<T> {
@@ -147,7 +149,7 @@ impl<T: Transport> FlashKit<T> {
         if id[0] != id[1] || id[0] == 0 {
             return Err(invalid("not a FlashKit MD programmer (bad id)"));
         }
-        let mut k = Self { t };
+        let mut k = Self { t, buffered: false };
         k.set_delay(0)?;
         k.t.set_timeout(Duration::from_secs(2))?;
         Ok(k)
@@ -411,6 +413,57 @@ impl<T: Transport> FlashKit<T> {
         self.wait_ready()
     }
 
+    /// Uses the chip's write buffer (from its CFI table) to program, which loads up to 32 words and programs them
+    /// together: much faster than word by word on paper, but NOT yet checked on the user's cartridge, so it is off by
+    /// default. A chip without a write buffer keeps the word-by-word programming.
+    pub fn set_buffered(&mut self, on: bool) {
+        self.buffered = on;
+    }
+
+    /// Programs one sector's content the way this session is set up (see [`set_buffered`](Self::set_buffered)).
+    fn program_sector(&mut self, offset: u32, data: &[u8], buffer_bytes: usize) -> Result<()> {
+        if self.buffered && buffer_bytes >= 2 {
+            self.program_buffered(offset, data, buffer_bytes)
+        } else {
+            self.program(offset, data)
+        }
+    }
+
+    /// DESTRUCTIVE. Programs `data` with the write buffer of the chip (AMD "write to buffer and program"): unlock,
+    /// `25` and the word count at the buffer's address, the words, then `29`; then waits for the chip. A buffer never
+    /// crosses a multiple of `buffer_bytes` (the first one is shorter when `offset` is not aligned).
+    pub fn program_buffered(&mut self, offset: u32, data: &[u8], buffer_bytes: usize) -> Result<()> {
+        if offset % 2 != 0 || data.len() % 2 != 0 || data.is_empty() || buffer_bytes < 2 || buffer_bytes % 2 != 0 || buffer_bytes > 128 {
+            return Err(invalid("buffered programming needs an even address and length and a write buffer of 2 to 128 bytes"));
+        }
+        let result = (|| -> Result<()> {
+            self.flash_reset()?;
+            let mut pos = 0usize;
+            while pos < data.len() {
+                let addr = offset + pos as u32;
+                let room = buffer_bytes - (addr as usize % buffer_bytes);
+                let n = room.min(data.len() - pos);
+                let words = (n / 2) as u16;
+                self.write_word(0x555 * 2, 0xAA)?;
+                self.write_word(0x2AA * 2, 0x55)?;
+                self.write_word(addr, 0x25)?;
+                self.write_word(addr, words - 1)?;
+                // the words go to consecutive addresses starting at `addr`: one address set, then auto-increment
+                let mut cmd = Self::addr_cmds(addr).to_vec();
+                for w in data[pos..pos + n].chunks(2) {
+                    cmd.extend_from_slice(&[CMD_WR | PAR_SINGLE | PAR_INC, w[0], w[1]]);
+                }
+                self.t.write_all(&cmd)?;
+                self.write_word(addr, 0x29)?;
+                self.wait_ready()?;
+                pos += n;
+            }
+            Ok(())
+        })();
+        let reset = self.flash_reset();
+        result.and(reset)
+    }
+
     /// DESTRUCTIVE. Programs `data` (even length) at the even byte address `offset` word by word, in unlock-bypass
     /// mode, waiting for the chip after every word. The target must be erased: programming only clears bits.
     pub fn program(&mut self, offset: u32, data: &[u8]) -> Result<()> {
@@ -517,7 +570,7 @@ impl<T: Transport> FlashKit<T> {
                     }
                     // an erased sector already holds 0xFF: programming it would only waste time
                     if want.iter().any(|&b| b != 0xFF) {
-                        self.program(off, &want)?;
+                        self.program_sector(off, &want, geometry.buffer_bytes)?;
                     }
                     if self.read(off, size as usize)? == want {
                         break;
@@ -609,6 +662,10 @@ mod tests {
         Bypass,
         BypassProgram,
         BypassExit,
+        /// After AA/55/25: the next write is the word count minus one.
+        BufferCount,
+        /// Loading the words of a write buffer; `29` programs them.
+        BufferData,
     }
 
     const SECTOR: usize = 0x10000;
@@ -634,6 +691,11 @@ mod tests {
         log: Vec<u8>,
         /// Start offsets of the sectors erased, in order.
         erased: Vec<usize>,
+        /// Write buffer being loaded: words still expected, and the words received.
+        buf_left: usize,
+        buf_words: Vec<(u32, u16)>,
+        /// How many buffers were programmed.
+        buffers: usize,
         /// The upper half of the chip cannot be written (a cartridge wired as 4 MiB): erase and program are ignored.
         upper_dead: bool,
         erased_ignored: usize,
@@ -643,7 +705,7 @@ mod tests {
         fn new(rom: Vec<u8>) -> Self {
             Self {
                 id: [0x42, 0x42], rom, sram: vec![0; 0x4000], bank: 0, addr: 0, len: 0, delay: 0, rx: vec![],
-                out: VecDeque::new(), chip: Chip::Array, flash: false, unlock: vec![], writes: vec![], log: vec![], erased: vec![], upper_dead: false, erased_ignored: 0,
+                out: VecDeque::new(), chip: Chip::Array, flash: false, unlock: vec![], writes: vec![], log: vec![], erased: vec![], upper_dead: false, erased_ignored: 0, buf_left: 0, buf_words: vec![], buffers: 0,
             }
         }
 
@@ -665,6 +727,7 @@ mod tests {
                 (Chip::Cfi, 0x11) => 0x0052,
                 (Chip::Cfi, 0x12) => 0x0059,
                 (Chip::Cfi, 0x13) => 0x0002, // AMD command set
+                (Chip::Cfi, 0x2A) => 6,      // write buffer of 2^6 = 64 bytes
                 (Chip::Cfi, 0x27) => self.rom.len().trailing_zeros() as u16,
                 (Chip::Cfi, 0x2C) => 1, // one region of uniform 64 KiB sectors
                 (Chip::Cfi, 0x2D) => (self.rom.len() / SECTOR - 1) as u16,
@@ -712,6 +775,26 @@ mod tests {
                 (Chip::Bypass, _, 0x90) => self.chip = Chip::BypassExit,
                 (Chip::BypassExit, _, 0x00) => self.chip = Chip::Array,
                 (Chip::Bypass | Chip::BypassExit, _, 0xF0) => {} // ignored in bypass mode
+                (Chip::BufferCount, _, n) => {
+                    self.buf_left = n as usize + 1;
+                    self.buf_words.clear();
+                    self.chip = Chip::BufferData;
+                }
+                (Chip::BufferData, _, 0x29) if self.buf_left == 0 => {
+                    for (a, v) in std::mem::take(&mut self.buf_words) {
+                        let i = a as usize * 2;
+                        if i + 1 < self.rom.len() {
+                            self.rom[i] &= (v >> 8) as u8;
+                            self.rom[i + 1] &= v as u8;
+                        }
+                    }
+                    self.buffers += 1;
+                    self.chip = Chip::Array;
+                }
+                (Chip::BufferData, a, v) if self.buf_left > 0 => {
+                    self.buf_words.push((a, v));
+                    self.buf_left -= 1;
+                }
                 (Chip::EraseArmed, _, 0x30) => {
                     let start = (a as usize * 2) / SECTOR * SECTOR;
                     self.rom[start..start + SECTOR].fill(0xFF);
@@ -724,6 +807,10 @@ mod tests {
                     self.unlock.clear();
                 }
                 (_, 0x555, 0xAA) | (_, 0x2AA, 0x55) => self.unlock.push((a, v)),
+                (_, _, 0x25) if self.unlock == [(0x555, 0xAA), (0x2AA, 0x55)] => {
+                    self.chip = Chip::BufferCount;
+                    self.unlock.clear();
+                }
                 (_, 0x555, 0x90) if self.unlock == [(0x555, 0xAA), (0x2AA, 0x55)] => {
                     self.chip = Chip::Autoselect;
                     self.unlock.clear();
@@ -992,7 +1079,7 @@ mod tests {
     fn the_geometry_comes_from_the_cfi_table_and_a_mask_rom_has_none() {
         let mut k = flash_kit();
         let g = k.read_geometry().unwrap().unwrap();
-        assert_eq!((g.command_set, g.size_bytes, g.buffer_bytes), (2, 0x80000, 0));
+        assert_eq!((g.command_set, g.size_bytes, g.buffer_bytes), (2, 0x80000, 64));
         assert_eq!(g.sectors, (0..8).map(|i| (i * 0x10000, 0x10000)).collect::<Vec<_>>());
         assert_eq!(k.into_inner().chip, Chip::Array, "left in read-array mode");
         assert_eq!(kit(game()).read_geometry().unwrap(), None);
@@ -1039,6 +1126,52 @@ mod tests {
         let s = k.into_inner();
         assert_eq!(s.rom[..4], [game()[0] & 0xF0, game()[1] & 0x0F, game()[2], game()[3]]);
         assert!(flash_kit().program(1, &[0, 0]).is_err() && flash_kit().program(0, &[0]).is_err() && flash_kit().program(0, &[]).is_err());
+    }
+
+    #[test]
+    fn buffered_programming_loads_each_buffer_and_programs_it_once() {
+        let data: Vec<u8> = (0..0x1000usize).map(|i| (i * 11 + 5) as u8).collect();
+        let mut k = flash_kit();
+        k.erase_sector(0x10000).unwrap();
+        // an unaligned start: the first buffer is shorter so that none crosses a 64-byte boundary
+        k.program_buffered(0x10010 + 0x20, &data[..0x100], 64).unwrap();
+        let s = k.into_inner();
+        assert_eq!(s.rom[0x10030..0x10130], data[..0x100]);
+        assert!(s.rom[0x10000..0x10030].iter().all(|&b| b == 0xFF) && s.rom[0x10130..0x20000].iter().all(|&b| b == 0xFF));
+        assert_eq!(s.buffers, 5, "0x100 bytes from 0x30: 16 + 64 + 64 + 64 + 48 bytes");
+        assert_eq!(s.chip, Chip::Array);
+        assert!(!s.writes.iter().any(|&(_, v)| v == 0xA0), "no word-by-word program command");
+    }
+
+    #[test]
+    fn buffered_programming_refuses_bad_parameters_before_sending_anything() {
+        let mut k = flash_kit();
+        for (off, len, buf) in [(1u32, 4usize, 64usize), (0, 3, 64), (0, 0, 64), (0, 4, 0), (0, 4, 3), (0, 4, 256)] {
+            assert!(k.program_buffered(off, &vec![0u8; len], buf).is_err(), "{off} {len} {buf}");
+        }
+        let s = k.into_inner();
+        assert_eq!(s.buffers, 0);
+        assert!(s.writes.iter().all(|&(a, v)| (a, v) != (0x555, 0xAA)), "nothing was sent");
+    }
+
+    #[test]
+    fn flashing_with_the_write_buffer_gives_the_same_cartridge_as_word_by_word() {
+        let mut image = game()[..0x28000].to_vec();
+        image[0x1000] ^= 0xFF;
+        image[0x21000] ^= 0x55;
+        let mut results = Vec::new();
+        for buffered in [false, true] {
+            let mut k = flash_kit();
+            k.set_buffered(buffered);
+            let g = k.read_geometry().unwrap().unwrap();
+            let r = k.flash_rom(&g, &image, &mut |_, _, _| {}, &|| false).unwrap();
+            assert_eq!(r.rewritten, 2);
+            let s = k.into_inner();
+            assert_eq!(s.buffers > 0, buffered, "the write buffer is used only when asked");
+            assert_eq!(s.writes.iter().any(|&(_, v)| v == 0xA0), !buffered);
+            results.push(s.rom);
+        }
+        assert_eq!(results[0], results[1], "both ways leave the same bytes");
     }
 
     #[test]

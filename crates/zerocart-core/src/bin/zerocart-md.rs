@@ -7,6 +7,7 @@
 //!   zerocart-md --save FILE                read the save RAM declared by the header
 //!   zerocart-md --identify                 identify the flash chip (CFI query + autoselect + reset commands only)
 //!   zerocart-md --flash FILE --backup OUT  DESTRUCTIVE: write FILE to a flash cartridge; a dry run unless --yes
+//!                                          (--buffered: use the chip's write buffer, faster, NOT yet checked on hardware)
 //!   zerocart-md --sector-test OFFSET [--yes]  DIAGNOSTIC: erase, program and restore ONE sector, reading back at each step
 //!   common: --port /dev/ttyUSB0 (default: the first FTDI 0403:6001 found)
 //!
@@ -164,6 +165,10 @@ fn run() -> Result<(), String> {
         return sector_test_run(&mut kit, off, yes);
     }
     if let Some(file) = flash {
+        if args.iter().any(|a| a == "--buffered") {
+            kit.set_buffered(true);
+            println!("write buffer programming requested (falls back to word by word on a chip without a write buffer)");
+        }
         flash_cartridge(&mut kit, &h, &file, arg(&args, "--backup"), yes)?;
         return Ok(());
     }

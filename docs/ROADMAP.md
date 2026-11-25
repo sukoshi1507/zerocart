@@ -191,3 +191,13 @@ d'une sauvegarde avec confirmation ; (6) essai sur l'appareil avec l'application
 Reste : (5) l'essai réel avec l'application LocalSend (téléphone ou PC) et avec ZeroSend ; les textes sont à passer dans la
 table de traduction (français et anglais dans `share.rs` et `share_screen.rs`) ; la découverte multicast n'a été vue qu'en
 boucle locale dans les tests.
+
+### Optimisation à valider sur la carte : écriture par tampon (2026-11-26, nuit)
+
+`FlashKit::set_buffered(true)` / `zerocart-md --flash ... --buffered` programme avec le tampon d'écriture de la puce (32 mots :
+déverrouillage, `25` et le nombre de mots, les mots, `29`, attente) au lieu du mot par mot (~24 Kio/s mesurés, limités par le temps
+de programmation de chaque mot). Sur le papier le gain est d'un ordre de grandeur sur une S29GL064N ; **non mesuré et non
+validé sur la cartouche de l'utilisateur**, donc désactivé par défaut (l'application reste en mot par mot). Écrit et testé contre le
+simulateur (puce avec tampon de 64 octets, tampons jamais à cheval sur une frontière, même résultat que le mot par mot).
+À faire avec l'utilisateur : `zerocart-md --flash MEGAPANG-modifie.bin --backup X.bin --buffered --yes` sur sa cartouche (1 Mio),
+comparer la durée et la relecture, puis restaurer ; si tout concorde, l'activer par défaut dans l'application.
