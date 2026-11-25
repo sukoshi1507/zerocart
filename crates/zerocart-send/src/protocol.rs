@@ -33,6 +33,9 @@ pub struct DeviceInfo {
     /// Multicast only: true for an announcement (the others should answer), false for an answer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub announce: Option<bool>,
+    /// The older name of `announce`, still sent by some apps.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub announcement: Option<bool>,
 }
 
 impl DeviceInfo {
@@ -48,7 +51,13 @@ impl DeviceInfo {
             protocol: http_fields.then(|| "https".to_string()),
             download: Some(false),
             announce: None,
+            announcement: None,
         }
+    }
+
+    /// An announcement asks the others to answer; an answer does not.
+    pub fn is_announcement(&self) -> bool {
+        self.announce.or(self.announcement).unwrap_or(false)
     }
 
     pub fn uses_https(&self) -> bool {

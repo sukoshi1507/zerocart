@@ -11,3 +11,5 @@ serde_json = "1"
 sha2 = "0.10"
 getrandom = "0.2"
 rcgen = { version = "0.13", default-features = false, features = ["ring", "pem"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+socket2 = { version = "0.5", features = ["all"] }

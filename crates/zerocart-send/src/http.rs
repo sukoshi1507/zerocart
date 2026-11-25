@@ -23,16 +23,61 @@ impl Request {
         self.headers.get(name).map(String::as_str)
     }
 
-    fn chunked(&self) -> bool {
-        self.header("transfer-encoding").is_some_and(|v| v.eq_ignore_ascii_case("chunked"))
-    }
+}
 
-    fn content_length(&self) -> io::Result<u64> {
-        match self.header("content-length") {
-            None => Ok(0),
-            Some(v) => v.trim().parse().map_err(|_| bad("invalid Content-Length")),
-        }
+fn is_chunked(headers: &HashMap<String, String>) -> bool {
+    headers.get("transfer-encoding").is_some_and(|v| v.eq_ignore_ascii_case("chunked"))
+}
+
+fn content_length(headers: &HashMap<String, String>) -> io::Result<u64> {
+    match headers.get("content-length") {
+        None => Ok(0),
+        Some(v) => v.trim().parse().map_err(|_| bad("invalid Content-Length")),
     }
+}
+
+/// The head of a response read by the client.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Response {
+    pub status: u16,
+    pub headers: HashMap<String, String>,
+}
+
+fn read_headers<R: BufRead>(r: &mut R) -> io::Result<HashMap<String, String>> {
+    let mut headers = HashMap::new();
+    loop {
+        let Some(h) = read_line(r)? else { return Err(bad("unexpected end of stream")) };
+        if h.is_empty() {
+            return Ok(headers);
+        }
+        if headers.len() >= MAX_HEADERS {
+            return Err(bad("too many headers"));
+        }
+        let (k, v) = h.split_once(':').ok_or_else(|| bad("malformed header"))?;
+        headers.insert(k.trim().to_ascii_lowercase(), v.trim().to_string());
+    }
+}
+
+/// Reads the status line and headers of a response.
+pub fn read_response<R: BufRead>(r: &mut R) -> io::Result<Response> {
+    let line = read_line(r)?.ok_or_else(|| bad("the connection closed without an answer"))?;
+    let mut parts = line.split_whitespace();
+    let (Some(version), Some(status)) = (parts.next(), parts.next()) else { return Err(bad("malformed status line")) };
+    if !version.starts_with("HTTP/1.") {
+        return Err(bad("not HTTP/1.x"));
+    }
+    let status = status.parse().map_err(|_| bad("malformed status code"))?;
+    Ok(Response { status, headers: read_headers(r)? })
+}
+
+/// Writes a request head (the body, if any, is written by the caller after it).
+pub fn write_request<W: Write>(w: &mut W, method: &str, target: &str, host: &str, headers: &[(&str, String)]) -> io::Result<()> {
+    let mut head = format!("{method} {target} HTTP/1.1\r\nHost: {host}\r\nUser-Agent: ZeroCart\r\n");
+    for (k, v) in headers {
+        head.push_str(&format!("{k}: {v}\r\n"));
+    }
+    head.push_str("\r\n");
+    w.write_all(head.as_bytes())
 }
 
 fn bad(msg: &str) -> io::Error {
@@ -118,18 +163,7 @@ pub fn read_request<R: BufRead>(r: &mut R) -> io::Result<Option<Request>> {
             (url_decode(k), url_decode(v))
         })
         .collect();
-    let mut headers = HashMap::new();
-    loop {
-        let Some(h) = read_line(r)? else { return Err(bad("unexpected end of stream")) };
-        if h.is_empty() {
-            break;
-        }
-        if headers.len() >= MAX_HEADERS {
-            return Err(bad("too many headers"));
-        }
-        let (k, v) = h.split_once(':').ok_or_else(|| bad("malformed header"))?;
-        headers.insert(k.trim().to_ascii_lowercase(), v.trim().to_string());
-    }
+    let headers = read_headers(r)?;
     Ok(Some(Request { method: method.to_ascii_uppercase(), path: url_decode(path), query, headers }))
 }
 
@@ -147,7 +181,12 @@ pub struct Body<'a, R: BufRead> {
 
 impl<'a, R: BufRead> Body<'a, R> {
     pub fn new(r: &'a mut R, req: &Request) -> io::Result<Self> {
-        let mode = if req.chunked() { Mode::Chunked(0, false) } else { Mode::Length(req.content_length()?) };
+        Self::with_headers(r, &req.headers)
+    }
+
+    /// The body that follows these headers (of a request or of a response).
+    pub fn with_headers(r: &'a mut R, headers: &HashMap<String, String>) -> io::Result<Self> {
+        let mode = if is_chunked(headers) { Mode::Chunked(0, false) } else { Mode::Length(content_length(headers)?) };
         Ok(Self { r, mode })
     }
 
@@ -327,6 +366,29 @@ mod tests {
         write_response(&mut out, 403, None, true).unwrap();
         let text = String::from_utf8(out).unwrap();
         assert!(text.starts_with("HTTP/1.1 403 Forbidden") && text.contains("Content-Length: 0") && !text.contains("Content-Type") && text.contains("close"));
+    }
+
+    #[test]
+    fn a_response_and_a_request_head_are_written_and_read_back() {
+        let mut out = Vec::new();
+        write_request(&mut out, "POST", "/api/localsend/v2/upload?a=b", "10.0.0.2:53317", &[("Content-Length", "3".into())]).unwrap();
+        out.extend_from_slice(b"abc");
+        let mut r = Cursor::new(out);
+        let req = read_request(&mut r).unwrap().unwrap();
+        assert_eq!((req.method.as_str(), req.path.as_str(), req.query["a"].as_str(), req.header("host")), ("POST", "/api/localsend/v2/upload", "b", Some("10.0.0.2:53317")));
+        let mut body = String::new();
+        Body::new(&mut r, &req).unwrap().read_to_string(&mut body).unwrap();
+        assert_eq!(body, "abc");
+        let mut resp = Vec::new();
+        write_response(&mut resp, 409, Some(&serde_json::json!({"x": 1})), false).unwrap();
+        let mut r = Cursor::new(resp);
+        let head = read_response(&mut r).unwrap();
+        assert_eq!(head.status, 409);
+        let mut b = String::new();
+        Body::with_headers(&mut r, &head.headers).unwrap().read_to_string(&mut b).unwrap();
+        assert_eq!(b, "{\"x\":1}");
+        assert!(read_response(&mut Cursor::new(&b""[..])).is_err());
+        assert!(read_response(&mut Cursor::new(&b"SMTP 250 ok\r\n\r\n"[..])).is_err());
     }
 
     #[test]

@@ -9,6 +9,8 @@ use std::path::Path;
 pub struct Identity {
     pub cert_pem: String,
     pub key_pem: String,
+    /// The private key, PKCS#8 DER.
+    pub key_der: Vec<u8>,
     pub cert_der: Vec<u8>,
     /// SHA-256 of the DER certificate, uppercase hex.
     pub fingerprint: String,
@@ -18,9 +20,10 @@ pub fn fingerprint(cert_der: &[u8]) -> String {
     Sha256::digest(cert_der).iter().map(|b| format!("{b:02X}")).collect()
 }
 
-/// The DER bytes of the first certificate of a PEM text.
-fn pem_to_der(pem: &str) -> Option<Vec<u8>> {
-    let body: String = pem.lines().skip_while(|l| !l.starts_with("-----BEGIN CERTIFICATE")).skip(1).take_while(|l| !l.starts_with("-----END")).collect();
+/// The DER bytes of the first PEM block whose label is `label` ("CERTIFICATE", "PRIVATE KEY").
+fn pem_to_der(pem: &str, label: &str) -> Option<Vec<u8>> {
+    let begin = format!("-----BEGIN {label}-----");
+    let body: String = pem.lines().skip_while(|l| l.trim() != begin).skip(1).take_while(|l| !l.starts_with("-----END")).collect();
     base64_decode(&body)
 }
 
@@ -59,12 +62,13 @@ impl Identity {
         let key = KeyPair::generate().map_err(|e| e.to_string())?;
         let cert = params.self_signed(&key).map_err(|e| e.to_string())?;
         let cert_der = cert.der().to_vec();
-        Ok(Self { fingerprint: fingerprint(&cert_der), cert_pem: cert.pem(), key_pem: key.serialize_pem(), cert_der })
+        Ok(Self { fingerprint: fingerprint(&cert_der), cert_pem: cert.pem(), key_pem: key.serialize_pem(), key_der: key.serialize_der(), cert_der })
     }
 
     pub fn from_pem(cert_pem: String, key_pem: String) -> Option<Self> {
-        let cert_der = pem_to_der(&cert_pem)?;
-        (!cert_der.is_empty()).then(|| Self { fingerprint: fingerprint(&cert_der), cert_pem, key_pem, cert_der })
+        let cert_der = pem_to_der(&cert_pem, "CERTIFICATE")?;
+        let key_der = pem_to_der(&key_pem, "PRIVATE KEY")?;
+        (!cert_der.is_empty() && !key_der.is_empty()).then(|| Self { fingerprint: fingerprint(&cert_der), cert_pem, key_pem, key_der, cert_der })
     }
 
     /// Loads `cert.pem` and `key.pem` from `dir`, or generates and saves them (the key readable by the owner only).
@@ -108,6 +112,7 @@ mod tests {
         let id = Identity::generate().unwrap();
         let back = Identity::from_pem(id.cert_pem.clone(), id.key_pem.clone()).unwrap();
         assert_eq!(back.cert_der, id.cert_der);
+        assert_eq!(back.key_der, id.key_der, "the key survives the PEM round trip");
         assert_eq!(back.fingerprint, id.fingerprint);
         assert!(Identity::from_pem("not a certificate".into(), String::new()).is_none());
     }
