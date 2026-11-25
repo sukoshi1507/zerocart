@@ -40,7 +40,7 @@ in `~/zerocart`; dumps are written there too.
 | `Y` | confirm a write |
 | Esc | cancel (only before the writing starts), quit |
 
-Command line tools (`zerocart-chis` and `zerocart-chis-flash` are for the Chisflash reader, original firmware): `zerocart --info | --dump-rom FILE | --dump-save FILE | --write-save FILE [--agb]`, and
+Command line tools (`zerocart-chis` and `zerocart-chis-flash` are for the Chisflash reader, original firmware; `zerocart-md` is a read-only test tool for the Krikzz Mega Drive flasher): `zerocart --info | --dump-rom FILE | --dump-save FILE | --write-save FILE [--agb]`, and
 `zerocart-flash --probe [--agb]`, `--rewrite-sector N --rom FILE`, `--flash-rom FILE --backup BACKUP [--yes]`
 (dry run unless `--yes`).
 
