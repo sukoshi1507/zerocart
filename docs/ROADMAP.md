@@ -157,3 +157,20 @@ l'écriture Mega Drive (fait côté code, voir ci-dessus ; à essayer sur la car
 découverte par multicast `224.0.0.167:53317`, serveur HTTPS (`register`, `info`, `prepare-upload`, `upload`, `cancel`),
 certificat auto-signé généré au premier démarrage dont le SHA-256 est l'empreinte, mTLS exigé par LocalSend 1.18+ pour
 l'envoi. Licence de ZeroSend : MIT, mention d'origine dans THIRD_PARTY.md. Tout envoi demande une confirmation à l'écran.
+
+### Avancement de ZeroSend dans ZeroCart (2026-11-25)
+
+Étape 1 faite : crate `crates/zerocart-send` (24 tests, sans réseau ni matériel) :
+- `protocol.rs` : constantes (port 53317, multicast 224.0.0.167, `/api/localsend/v2/`, version 2.1) et messages JSON
+  (`DeviceInfo`, `FileMeta`, `PrepareUploadRequest/Response`) dans les noms de champs de LocalSend.
+- `identity.rs` : certificat auto-signé généré une fois (`~/.config/zerocart/send/` prévu), clé en 0600, empreinte = SHA-256
+  du certificat DER en hexadécimal majuscule (l'empreinte LocalSend).
+- `http.rs` : mini HTTP/1.1 (tête de requête bornée, corps en `Content-Length` ou en chunks lu au fil de l'eau, réponses).
+- `receive.rs` : réception (`info`, `register`, `prepare-upload`, `upload`, `cancel`) : rien n'est écrit avant que
+  l'utilisateur accepte (trait `Ui`), fichier `.part` puis renommage après contrôle du SHA-256, noms sûrs (pas de `..`),
+  jamais d'écrasement, une session à la fois (409), jetons par fichier et même adresse IP exigés, messages texte (204).
+
+À faire ensuite, dans cet ordre : (2) la couche TLS (rustls, certificat de l'identité, serveur sur le port 53317) ;
+(3) la découverte multicast UDP (annonce et réponse) ; (4) l'envoi (client HTTPS avec certificat client, mTLS exigé par
+LocalSend 1.18+, empreinte du pair) ; (5) l'écran dans l'app : liste des appareils, acceptation sur Y/N, envoi d'un dump ou
+d'une sauvegarde avec confirmation ; (6) essai sur l'appareil avec l'application LocalSend d'un téléphone ou d'un PC.

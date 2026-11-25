@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/zerocart-core", "crates/zerocart-flashchips", "crates/zerocart-ui", "crates/zerocart-app"]
+members = ["crates/zerocart-core", "crates/zerocart-flashchips", "crates/zerocart-ui", "crates/zerocart-app", "crates/zerocart-send"]
 
 [workspace.package]
 version = "0.1.0"
