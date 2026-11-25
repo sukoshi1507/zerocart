@@ -39,6 +39,12 @@ La carte de l'utilisateur est un FTDI « FT245R USB FIFO », USB 0403:6001, `/de
 PID est celui, générique, des FT232R/FT245R : la poignée de main (identifiant à deux octets égaux et non nuls) confirme
 que c'est bien le programmeur. `krikzz::find_ports()` filtre dessus.
 
+Lecture VALIDÉE sur la carte (2026-11-25) : `zerocart-md` a dumpé trois fois la même cartouche (MEGA PANG, 1 Mio) avec
+le même SHA-1 ; le CRC32 `2a3fbadb` correspond, d'après l'utilisateur, à une version précise du portage homebrew de
+Mega Pang (RCampeador, itch.io). La checksum de l'en-tête de cette ROM (0x2AAF) diffère de celle calculée (0x2FAA) : c'est
+l'en-tête du homebrew, pas un défaut du lecteur. Dans l'application, la comparaison avec l'en-tête sera donc un
+AVERTISSEMENT et non une erreur, et le CRC32 reste la preuve de lecture.
+
 Côté lecture, le protocole est écrit et testé contre un simulateur (2026-11-25), PAS encore branché dans l'application
 ni essayé sur la carte : `zerocart-core/src/krikzz.rs` (`FlashKit<T>` : poignée de main, lecture de mots et de blocs,
 en-tête, dump de ROM avec CRC-32 et checksum Mega Drive, lecture de la sauvegarde par le registre 0xA13000,
