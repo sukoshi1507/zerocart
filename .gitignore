@@ -1,0 +1,18 @@
+# build output
+/target/
+/dist/
+
+# ROM dumps, saves and firmware blobs are never committed (commercial games, unknown rights):
+# keep only the checksums so that anyone can check their own dumps.
+/dumps/*
+!/dumps/SHA1SUMS
+*.gb
+*.gbc
+*.gba
+*.sav
+*.md.rom
+*.bin
+
+# editor / OS
+*~
+.DS_Store

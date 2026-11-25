@@ -1,0 +1,22 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: zerocart
+Source: https://github.com/lesserkuma/FlashGBX (protocol, chip databases)
+
+Files: *
+Copyright: 2026 sukoshi1507
+           2020-2026 Lesserkuma (FlashGBX protocol and databases)
+License: GPL-3.0+
+
+Files: usr/share/zerocart/configs/*
+Copyright: 2020-2026 Lesserkuma
+License: GPL-3.0+
+
+License: GPL-3.0+
+ This program is free software: you can redistribute it and/or modify it under the terms of the GNU General
+ Public License as published by the Free Software Foundation, either version 3 of the License, or (at your
+ option) any later version.
+ .
+ On Debian systems, the complete text of the GNU General Public License version 3 can be found in
+ /usr/share/common-licenses/GPL-3.
+
+# The renderer, keyboard and framebuffer code copied from ZeroTag keeps its own MIT licence: see THIRD_PARTY.md.

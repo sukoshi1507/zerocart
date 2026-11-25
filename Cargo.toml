@@ -1,0 +1,13 @@
+[workspace]
+resolver = "2"
+members = ["crates/zerocart-core", "crates/zerocart-flashchips", "crates/zerocart-ui", "crates/zerocart-app"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later" # protocol ported from FlashGBX (GPL-3.0)
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true

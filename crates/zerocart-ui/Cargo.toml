@@ -1,0 +1,10 @@
+[package]
+name = "zerocart-ui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "ZeroCart screens (320x170) drawn with a small software renderer"
+
+[dependencies]
+ab_glyph = "0.2"
+memmap2 = "0.9"

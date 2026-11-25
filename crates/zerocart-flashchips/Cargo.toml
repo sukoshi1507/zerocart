@@ -1,0 +1,10 @@
+[package]
+name = "zerocart-flashchips"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Flash chip profiles (from FlashGBX) and detection"
+
+[dependencies]
+zerocart-core = { path = "../zerocart-core" }
+serde_json = "1"

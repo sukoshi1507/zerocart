@@ -1,0 +1,19 @@
+[package]
+name = "zerocart-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "ZeroCart for the CardputerZero"
+
+[[bin]]
+name = "zerocart-app"
+path = "src/main.rs"
+
+[dependencies]
+zerocart-core = { path = "../zerocart-core" }
+zerocart-flashchips = { path = "../zerocart-flashchips" }
+zerocart-ui = { path = "../zerocart-ui" }
+png = "0.17"
+
+[dev-dependencies]
+tempfile = "3"
