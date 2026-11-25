@@ -5,11 +5,13 @@
 //!   zerocart-md --header                   the "SEGA" header of the inserted cartridge
 //!   zerocart-md --dump FILE [--size N]     dump the ROM (size from the header unless --size is given)
 //!   zerocart-md --save FILE                read the save RAM declared by the header
+//!   zerocart-md --identify                 identify the flash chip (CFI query + autoselect + reset commands only)
 //!   common: --port /dev/ttyUSB0 (default: the first FTDI 0403:6001 found)
 //!
 //! It never erases, programs or writes data to a cartridge. The only bus writes are the bank register (0xA13000: it
-//! maps the ROM or the save RAM at 0x200000) and the programmer's own settings. The flash chip is not probed: the
-//! identification sends command sequences (CFI query, autoselect, reset) and is left to a later, explicit option.
+//! maps the ROM or the save RAM at 0x200000) and the programmer's own settings. `--identify` is the exception: it
+//! sends flash command sequences (CFI query, autoselect, reset), never erase or program, and leaves the chip in
+//! read-array mode.
 use std::io::Write;
 use std::path::Path;
 use zerocart_core::krikzz::{self, FlashKit};
@@ -63,9 +65,10 @@ fn run() -> Result<(), String> {
     let header = args.iter().any(|a| a == "--header");
     let dump = arg(&args, "--dump");
     let save = arg(&args, "--save");
-    if !(info || header || dump.is_some() || save.is_some()) {
-        println!("usage: zerocart-md --info | --header | --dump FILE [--size N] | --save FILE   [--port /dev/ttyUSB0]");
-        println!("read-only: nothing is erased, programmed or written to the cartridge.");
+    let identify = args.iter().any(|a| a == "--identify");
+    if !(info || header || identify || dump.is_some() || save.is_some()) {
+        println!("usage: zerocart-md --info | --header | --identify | --dump FILE [--size N] | --save FILE   [--port /dev/ttyUSB0]");
+        println!("nothing is erased or programmed; --identify only sends the chip's query, identifier and reset commands.");
         return Ok(());
     }
     let ports = krikzz::find_ports();
@@ -80,13 +83,26 @@ fn run() -> Result<(), String> {
     let t = SerialTransport::open(&port, 9600).map_err(|e| format!("{port}: {e}"))?;
     let mut kit = FlashKit::connect(t).map_err(|e| format!("handshake: {e}"))?;
     println!("handshake: FlashKit MD programmer answered with a valid id");
-    if info && !(header || dump.is_some() || save.is_some()) {
+    if info && !(header || identify || dump.is_some() || save.is_some()) {
         return Ok(());
     }
 
     let bytes = kit.read_header_bytes().map_err(|e| format!("reading the header: {e}"))?;
     let h = megadrive::parse_header(&bytes).ok_or("short header")?;
     show(&h);
+
+    if identify {
+        match kit.probe_flash().map_err(|e| format!("identify: {e}"))? {
+            None => println!("flash: no chip answered the CFI query or the identifier command (mask ROM, or not a flash cartridge)"),
+            Some(f) => {
+                println!("flash: CFI {}, size {}", if f.cfi_ok { "OK" } else { "not answered" },
+                    if f.size_bytes == 0 { "unknown".to_string() } else { format!("{} KiB", f.size_bytes / 1024) });
+                println!("  manufacturer 0x{:04X}, device {}{}", f.manufacturer,
+                    f.device_id.iter().map(|d| format!("{d:04X}")).collect::<Vec<_>>().join("/"),
+                    if f.byte_wide { " (a pair of 8-bit chips, ids are byte values)" } else { "" });
+            }
+        }
+    }
 
     if let Some(file) = dump {
         if !h.is_valid() && arg(&args, "--size").is_none() {
