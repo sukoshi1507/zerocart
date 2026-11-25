@@ -3,7 +3,8 @@
 //!
 //! Two parts:
 //! - [`FlashKit`]: the wire protocol and the READ side (header, ROM dump, flash chip identification, save RAM
-//!   read). It is NOT wired into the application yet and nothing in it erases or programs a cartridge.
+//!   read) and the WRITE side (CFI geometry, sector erase, programming, verification). It is NOT wired into the
+//!   application yet.
 //! - [`KrikzzMd`]: the PLACEHOLDER of the application's reader (`CartReader`): every operation still answers
 //!   [`Error::Planned`] ("Mega Drive : bientôt") and nothing opens a port, so no behaviour depends on it.
 //!
@@ -34,8 +35,7 @@ mod wire {
     pub const CMD_LEN: u8 = 1;
     pub const CMD_RD: u8 = 2;
     pub const CMD_WR: u8 = 3;
-    /// Wait for the flash to be ready: used by flash programming, which is not implemented yet.
-    #[allow(dead_code)]
+    /// Wait for the flash chip to be ready (its RY/BY# line).
     pub const CMD_RY: u8 = 4;
     pub const CMD_DELAY: u8 = 5;
     /// Auto-increment the address (block transfer).
@@ -84,6 +84,32 @@ pub struct MdDump {
     /// To compare with the header's checksum word.
     pub checksum16: u16,
 }
+
+/// The flash chip's layout from its CFI table.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FlashGeometry {
+    /// CFI primary command set: 2 = AMD/Spansion, the only one the erase and program sequences here are for.
+    pub command_set: u16,
+    pub size_bytes: usize,
+    /// Write buffer of the chip in bytes (0 when it has none). Not used: programming is word by word.
+    pub buffer_bytes: usize,
+    /// `(offset, size)` of every erase sector, in address order, covering the whole chip.
+    pub sectors: Vec<(u32, u32)>,
+}
+
+/// What [`FlashKit::flash_rom`] did.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FlashReport {
+    pub rewritten: usize,
+    pub unchanged: usize,
+    /// Sectors that needed a second attempt.
+    pub retried: usize,
+}
+
+/// Bytes of one programming block (the reference client programs 4 KiB at a time).
+pub const PROGRAM_BLOCK: usize = 4096;
+/// A sector erase answers only when the chip is ready again (up to a few seconds on a large sector).
+pub const READY_TIMEOUT: Duration = Duration::from_secs(60);
 
 pub struct FlashKit<T: Transport> {
     t: T,
@@ -272,6 +298,183 @@ impl<T: Transport> FlashKit<T> {
         let device_id = if dev1 & 0xFF == 0x7E { vec![dev1, id(0x1C), id(0x1E)] } else { vec![dev1] };
         Ok(Some(FlashIdInfo { cfi_ok, size_bytes, manufacturer: id(0x00), device_id, byte_wide }))
     }
+
+    /// Reads the chip's CFI table: command set, size, write buffer and the erase sectors. Only the CFI query and
+    /// the reset command are sent. `None`: the chip does not answer the query.
+    pub fn read_geometry(&mut self) -> Result<Option<FlashGeometry>> {
+        let table = (|| -> Result<Vec<u8>> {
+            self.write_byte(0x55 * 2, 0x98)?;
+            let t = self.read(0x20, 0x5A)?; // words 0x10..=0x3A
+            self.write_word(0, 0xF0)?;
+            Ok(t)
+        })();
+        let table = match table {
+            Ok(t) => t,
+            Err(e) => {
+                let _ = self.write_word(0, 0xF0);
+                return Err(e);
+            }
+        };
+        let w = |i: usize| table[(i - 0x10) * 2 + 1] as usize; // CFI data is in the low byte of each word
+        if table[..6] != CFI_QRY {
+            return Ok(None);
+        }
+        let command_set = (w(0x13) | w(0x14) << 8) as u16;
+        let size_exp = w(0x27);
+        if !(10..=30).contains(&size_exp) {
+            return Ok(None);
+        }
+        let size_bytes = 1usize << size_exp;
+        let buffer_exp = w(0x2A);
+        let buffer_bytes = if (1..=12).contains(&buffer_exp) { 1usize << buffer_exp } else { 0 };
+        let regions = w(0x2C);
+        let mut sectors = Vec::new();
+        let mut offset = 0u64;
+        for r in 0..regions {
+            let count = (w(0x2D + 4 * r) | w(0x2E + 4 * r) << 8) + 1;
+            let size = (w(0x2F + 4 * r) | w(0x30 + 4 * r) << 8) * 256;
+            if size == 0 {
+                return Ok(None);
+            }
+            for _ in 0..count {
+                sectors.push((offset as u32, size as u32));
+                offset += size as u64;
+            }
+        }
+        // a table that does not add up to the chip is not trusted: nothing would be erased from it
+        if regions == 0 || offset != size_bytes as u64 {
+            return Ok(None);
+        }
+        Ok(Some(FlashGeometry { command_set, size_bytes, buffer_bytes, sectors }))
+    }
+
+    /// Back to read-array mode, also out of unlock-bypass mode (the reference client's `flashResetByPass`).
+    pub fn flash_reset(&mut self) -> Result<()> {
+        self.write_word(0, 0xF0)?;
+        self.write_byte(0, 0x90)?;
+        self.write_byte(0, 0x00)
+    }
+
+    /// Waits for the chip (RY/BY#): the programmer answers once it is ready.
+    fn wait_ready(&mut self) -> Result<()> {
+        self.t.set_timeout(READY_TIMEOUT)?;
+        let r = (|| {
+            self.t.write_all(&[CMD_RY, CMD_RD | PAR_SINGLE])?;
+            let mut w = [0u8; 2];
+            read_exact(&mut self.t, &mut w).map_err(|e| match e {
+                Error::ShortRead { got: 0, .. } => Error::NoAnswer,
+                e => e,
+            })
+        })();
+        self.t.set_timeout(Duration::from_secs(2))?;
+        r
+    }
+
+    /// DESTRUCTIVE. Erases the sector that starts at `offset` and waits for the end of the erase.
+    pub fn erase_sector(&mut self, offset: u32) -> Result<()> {
+        self.flash_reset()?;
+        for (a, v) in [(0x555, 0xAA), (0x2AA, 0x55), (0x555, 0x80), (0x555, 0xAA), (0x2AA, 0x55)] {
+            self.write_word(a * 2, v)?;
+        }
+        self.write_byte(offset, 0x30)?;
+        self.wait_ready()
+    }
+
+    /// DESTRUCTIVE. Programs `data` (even length) at the even byte address `offset` word by word, in unlock-bypass
+    /// mode, waiting for the chip after every word. The target must be erased: programming only clears bits.
+    pub fn program(&mut self, offset: u32, data: &[u8]) -> Result<()> {
+        if offset % 2 != 0 || data.len() % 2 != 0 || data.is_empty() {
+            return Err(invalid("programming needs an even address and a non-empty even length"));
+        }
+        self.write_byte(0x555 * 2, 0xAA)?;
+        self.write_byte(0x2AA * 2, 0x55)?;
+        self.write_byte(0x555 * 2, 0x20)?; // unlock bypass: from now on a program command is just A0
+        let result = (|| {
+            self.set_addr(offset)?;
+            for block in data.chunks(PROGRAM_BLOCK) {
+                let mut cmd = Vec::with_capacity(block.len() * 3);
+                for w in block.chunks(2) {
+                    cmd.extend_from_slice(&[CMD_WR | PAR_SINGLE | PAR_MODE8, 0xA0, CMD_WR | PAR_SINGLE | PAR_INC, w[0], w[1], CMD_RY]);
+                }
+                self.t.write_all(&cmd)?;
+            }
+            Ok(())
+        })();
+        let reset = self.flash_reset();
+        result.and(reset)
+    }
+
+    /// DESTRUCTIVE. Writes `image` at offset 0 of the flash cartridge: the sectors that hold it are compared with the
+    /// image (padded with 0xFF to the end of its last sector) and only the ones that differ are erased and
+    /// programmed, each read back (one retry). `geometry` must come from [`read_geometry`](Self::read_geometry) of
+    /// THIS cartridge. `cancel` is checked between sectors, never inside one. `progress(message, done, total)`
+    /// counts sectors. Whole-image verification and the backup of what is overwritten are the caller's job.
+    pub fn flash_rom(
+        &mut self,
+        geometry: &FlashGeometry,
+        image: &[u8],
+        progress: &mut dyn FnMut(&str, usize, usize),
+        cancel: &dyn Fn() -> bool,
+    ) -> Result<FlashReport> {
+        if geometry.command_set != 2 {
+            return Err(invalid("only the AMD/Spansion command set is supported"));
+        }
+        if image.is_empty() || image.len() % 2 != 0 || image.len() > geometry.size_bytes {
+            return Err(invalid("the image is empty, odd, or larger than the flash chip: nothing is erased"));
+        }
+        let used: Vec<(u32, u32)> = geometry.sectors.iter().copied().filter(|s| (s.0 as usize) < image.len()).collect();
+        let target = |off: u32, size: u32| -> Vec<u8> {
+            let (o, e) = (off as usize, (off as usize + size as usize).min(image.len()));
+            let mut t = image[o..e].to_vec();
+            t.resize(size as usize, 0xFF);
+            t
+        };
+        self.set_delay(0)?;
+        self.write_word(BANK_REGISTER, 0x0000)?;
+        let mut report = FlashReport::default();
+        let result = (|| -> Result<()> {
+            for (i, &(off, size)) in used.iter().enumerate() {
+                if cancel() {
+                    return Err(Error::Cancelled);
+                }
+                let want = target(off, size);
+                if self.read(off, size as usize)? == want {
+                    report.unchanged += 1;
+                    progress("unchanged", i + 1, used.len());
+                    continue;
+                }
+                let mut attempt = 0;
+                loop {
+                    attempt += 1;
+                    progress(if attempt == 1 { "erasing and programming" } else { "again" }, i, used.len());
+                    self.erase_sector(off)?;
+                    if self.read(off, size as usize)?.iter().any(|&b| b != 0xFF) {
+                        if attempt < 2 {
+                            continue;
+                        }
+                        return Err(invalid("a sector did not erase"));
+                    }
+                    self.program(off, &want)?;
+                    if self.read(off, size as usize)? == want {
+                        break;
+                    }
+                    if attempt >= 2 {
+                        return Err(invalid("a sector still differs after two attempts"));
+                    }
+                }
+                if attempt > 1 {
+                    report.retried += 1;
+                }
+                report.rewritten += 1;
+                progress("done", i + 1, used.len());
+            }
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = self.flash_reset(); // best effort: leave the chip in read-array mode
+        }
+        result.map(|_| report)
+    }
 }
 
 /// The placeholder of the application's reader: see the module documentation.
@@ -336,7 +539,15 @@ mod tests {
         Array,
         Cfi,
         Autoselect,
+        /// After AA/55/80/AA/55: the next 30 erases a sector.
+        EraseArmed,
+        /// Unlock bypass: A0 starts a program, 90 then 00 leaves.
+        Bypass,
+        BypassProgram,
+        BypassExit,
     }
+
+    const SECTOR: usize = 0x10000;
 
     /// The programmer and a cartridge, simulated from the protocol: parses the command stream the way the firmware does
     /// (commands can be split over several writes), a ROM, a save RAM on odd bytes behind the bank register, and a
@@ -357,13 +568,15 @@ mod tests {
         unlock: Vec<(u32, u16)>,
         writes: Vec<(u32, u16)>,
         log: Vec<u8>,
+        /// Start offsets of the sectors erased, in order.
+        erased: Vec<usize>,
     }
 
     impl Sim {
         fn new(rom: Vec<u8>) -> Self {
             Self {
                 id: [0x42, 0x42], rom, sram: vec![0; 0x4000], bank: 0, addr: 0, len: 0, delay: 0, rx: vec![],
-                out: VecDeque::new(), chip: Chip::Array, flash: false, unlock: vec![], writes: vec![], log: vec![],
+                out: VecDeque::new(), chip: Chip::Array, flash: false, unlock: vec![], writes: vec![], log: vec![], erased: vec![],
             }
         }
 
@@ -384,7 +597,11 @@ mod tests {
                 (Chip::Cfi, 0x10) => 0x0051,
                 (Chip::Cfi, 0x11) => 0x0052,
                 (Chip::Cfi, 0x12) => 0x0059,
-                (Chip::Cfi, 0x27) => 0x0016, // 2^22 = 4 MiB
+                (Chip::Cfi, 0x13) => 0x0002, // AMD command set
+                (Chip::Cfi, 0x27) => self.rom.len().trailing_zeros() as u16,
+                (Chip::Cfi, 0x2C) => 1, // one region of uniform 64 KiB sectors
+                (Chip::Cfi, 0x2D) => (self.rom.len() / SECTOR - 1) as u16,
+                (Chip::Cfi, 0x30) => 0x0001,
                 (Chip::Autoselect, 0x00) => 0x0001,
                 (Chip::Autoselect, 0x01) => 0x227E,
                 (Chip::Autoselect, 0x0E) => 0x2210,
@@ -409,18 +626,49 @@ mod tests {
             if !self.flash {
                 return;
             }
-            match (a, v) {
-                (0x55, 0x98) => self.chip = Chip::Cfi,
-                (_, 0xF0) => {
+            match (self.chip, a, v) {
+                (Chip::BypassProgram, _, _) => {
+                    // programming only clears bits (AND), like a real chip
+                    let i = a as usize * 2;
+                    if i + 1 < self.rom.len() {
+                        self.rom[i] &= (v >> 8) as u8;
+                        self.rom[i + 1] &= v as u8;
+                    }
+                    self.chip = Chip::Bypass;
+                }
+                (Chip::Bypass, _, 0xA0) => self.chip = Chip::BypassProgram,
+                (Chip::Bypass, _, 0x90) => self.chip = Chip::BypassExit,
+                (Chip::BypassExit, _, 0x00) => self.chip = Chip::Array,
+                (Chip::Bypass | Chip::BypassExit, _, 0xF0) => {} // ignored in bypass mode
+                (Chip::EraseArmed, _, 0x30) => {
+                    let start = (a as usize * 2) / SECTOR * SECTOR;
+                    self.rom[start..start + SECTOR].fill(0xFF);
+                    self.chip = Chip::Array;
+                    self.erased.push(start);
+                }
+                (_, 0x55, 0x98) => self.chip = Chip::Cfi,
+                (_, _, 0xF0) => {
                     self.chip = Chip::Array;
                     self.unlock.clear();
                 }
-                (0x555, 0xAA) | (0x2AA, 0x55) => self.unlock.push((a, v)),
-                (0x555, 0x90) if self.unlock == [(0x555, 0xAA), (0x2AA, 0x55)] => {
+                (_, 0x555, 0xAA) | (_, 0x2AA, 0x55) => self.unlock.push((a, v)),
+                (_, 0x555, 0x90) if self.unlock == [(0x555, 0xAA), (0x2AA, 0x55)] => {
                     self.chip = Chip::Autoselect;
                     self.unlock.clear();
                 }
+                (_, 0x555, 0x80) if self.unlock == [(0x555, 0xAA), (0x2AA, 0x55)] => {
+                    self.unlock = vec![(0x555, 0x80)];
+                }
+                (_, 0x555, 0x20) if self.unlock == [(0x555, 0xAA), (0x2AA, 0x55)] => {
+                    self.chip = Chip::Bypass;
+                    self.unlock.clear();
+                }
                 _ => {}
+            }
+            // the second unlock pair of an erase arms it
+            if self.unlock == [(0x555, 0x80), (0x555, 0xAA), (0x2AA, 0x55)] {
+                self.chip = Chip::EraseArmed;
+                self.unlock.clear();
             }
         }
 
@@ -652,7 +900,7 @@ mod tests {
         let id = k.probe_flash().unwrap().unwrap();
         assert_eq!(
             id,
-            FlashIdInfo { cfi_ok: true, size_bytes: 4 << 20, manufacturer: 1, device_id: vec![0x227E, 0x2210, 0x2200], byte_wide: false }
+            FlashIdInfo { cfi_ok: true, size_bytes: 0x80000, manufacturer: 1, device_id: vec![0x227E, 0x2210, 0x2200], byte_wide: false }
         );
         let s = k.into_inner();
         assert_eq!(s.chip, Chip::Array, "the chip is left in read-array mode");
@@ -660,6 +908,102 @@ mod tests {
         let allowed = [(0x55, 0x98), (0, 0xF0), (0x555, 0xAA), (0x2AA, 0x55), (0x555, 0x90)];
         assert!(s.writes.iter().all(|w| allowed.contains(w)), "{:?}", s.writes);
         assert!(!s.writes.iter().any(|&(_, v)| matches!(v, 0x30 | 0x80 | 0xA0 | 0x20)), "no erase or program command");
+    }
+
+    fn flash_kit() -> FlashKit<Sim> {
+        let mut s = Sim::new(game());
+        s.flash = true;
+        FlashKit::connect(s).unwrap()
+    }
+
+    #[test]
+    fn the_geometry_comes_from_the_cfi_table_and_a_mask_rom_has_none() {
+        let mut k = flash_kit();
+        let g = k.read_geometry().unwrap().unwrap();
+        assert_eq!((g.command_set, g.size_bytes, g.buffer_bytes), (2, 0x80000, 0));
+        assert_eq!(g.sectors, (0..8).map(|i| (i * 0x10000, 0x10000)).collect::<Vec<_>>());
+        assert_eq!(k.into_inner().chip, Chip::Array, "left in read-array mode");
+        assert_eq!(kit(game()).read_geometry().unwrap(), None);
+    }
+
+    #[test]
+    fn erasing_a_sector_touches_only_that_sector_and_waits_for_the_chip() {
+        let mut k = flash_kit();
+        k.erase_sector(0x20000).unwrap();
+        let s = k.into_inner();
+        assert_eq!(s.erased, vec![0x20000]);
+        assert!(s.rom[0x20000..0x30000].iter().all(|&b| b == 0xFF));
+        assert_eq!(s.rom[..0x20000], game()[..0x20000]);
+        assert_eq!(s.rom[0x30000..], game()[0x30000..]);
+        assert!(s.log.contains(&CMD_RY), "the end of the erase is waited for");
+    }
+
+    #[test]
+    fn programming_only_clears_bits_so_the_sector_must_be_erased_first() {
+        let data: Vec<u8> = (0..0x2000usize).map(|i| (i * 7 + 3) as u8).collect();
+        let mut k = flash_kit();
+        k.erase_sector(0x10000).unwrap();
+        k.program(0x10000, &data).unwrap();
+        let s = k.into_inner();
+        assert_eq!(s.rom[0x10000..0x12000], data[..]);
+        assert!(s.rom[0x12000..0x20000].iter().all(|&b| b == 0xFF));
+        assert_eq!(s.chip, Chip::Array, "bypass mode is left");
+        // without an erase, the old content ANDs with the new
+        let mut k = flash_kit();
+        k.program(0, &[0xF0, 0x0F, 0xFF, 0xFF]).unwrap();
+        let s = k.into_inner();
+        assert_eq!(s.rom[..4], [game()[0] & 0xF0, game()[1] & 0x0F, game()[2], game()[3]]);
+        assert!(flash_kit().program(1, &[0, 0]).is_err() && flash_kit().program(0, &[0]).is_err() && flash_kit().program(0, &[]).is_err());
+    }
+
+    #[test]
+    fn flashing_rewrites_only_the_sectors_that_differ_and_pads_the_last_one() {
+        let mut k = flash_kit();
+        let g = k.read_geometry().unwrap().unwrap();
+        let mut image = game()[..0x28000].to_vec();
+        image[0x1000] ^= 0xFF; // sector 0
+        image[0x21000] ^= 0x55; // sector 2
+        let mut steps = Vec::new();
+        let r = k.flash_rom(&g, &image, &mut |m, d, t| steps.push((m.to_string(), d, t)), &|| false).unwrap();
+        assert_eq!(r, FlashReport { rewritten: 2, unchanged: 1, retried: 0 });
+        let s = k.into_inner();
+        assert_eq!(s.erased, vec![0, 0x20000], "sector 1 was identical and is not erased");
+        assert_eq!(s.rom[..0x28000], image[..]);
+        assert!(s.rom[0x28000..0x30000].iter().all(|&b| b == 0xFF), "the end of the last sector is padded with FF");
+        assert_eq!(s.rom[0x30000..], game()[0x30000..], "sectors beyond the image are not touched");
+        assert_eq!(s.chip, Chip::Array);
+        assert_eq!(steps.last().unwrap(), &("done".to_string(), 3, 3));
+    }
+
+    #[test]
+    fn nothing_is_erased_when_the_image_does_not_fit_or_the_chip_is_not_amd() {
+        let mut k = flash_kit();
+        let g = k.read_geometry().unwrap().unwrap();
+        for bad in [vec![], vec![0u8; 3], vec![0u8; 0x80002]] {
+            assert!(k.flash_rom(&g, &bad, &mut |_, _, _| {}, &|| false).is_err());
+        }
+        let other = FlashGeometry { command_set: 1, ..g.clone() };
+        assert!(k.flash_rom(&other, &game(), &mut |_, _, _| {}, &|| false).is_err());
+        let s = k.into_inner();
+        assert!(s.erased.is_empty() && s.rom == game());
+    }
+
+    #[test]
+    fn a_cancelled_flash_stops_between_sectors_and_leaves_the_chip_readable() {
+        let mut k = flash_kit();
+        let g = k.read_geometry().unwrap().unwrap();
+        let mut image = game();
+        for b in image.iter_mut().step_by(0x10000) {
+            *b ^= 0xFF; // every sector differs
+        }
+        let count = std::cell::Cell::new(0);
+        let e = k.flash_rom(&g, &image, &mut |m, _, _| if m == "done" { count.set(count.get() + 1) }, &|| count.get() >= 2).unwrap_err();
+        assert!(matches!(e, Error::Cancelled));
+        let s = k.into_inner();
+        assert_eq!(s.erased, vec![0, 0x10000], "two sectors were done, then the cancel was heard");
+        assert_eq!(s.rom[..0x20000], image[..0x20000]);
+        assert_eq!(s.rom[0x20000..], game()[0x20000..]);
+        assert_eq!(s.chip, Chip::Array);
     }
 
     #[test]

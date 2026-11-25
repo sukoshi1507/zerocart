@@ -6,10 +6,11 @@
 //!   zerocart-md --dump FILE [--size N]     dump the ROM (size from the header unless --size is given)
 //!   zerocart-md --save FILE                read the save RAM declared by the header
 //!   zerocart-md --identify                 identify the flash chip (CFI query + autoselect + reset commands only)
+//!   zerocart-md --flash FILE --backup OUT  DESTRUCTIVE: write FILE to a flash cartridge; a dry run unless --yes
 //!   common: --port /dev/ttyUSB0 (default: the first FTDI 0403:6001 found)
 //!
-//! It never erases, programs or writes data to a cartridge. The only bus writes are the bank register (0xA13000: it
-//! maps the ROM or the save RAM at 0x200000) and the programmer's own settings. `--identify` is the exception: it
+//! Except with `--flash ... --yes`, it never erases, programs or writes data to a cartridge: the only bus writes are
+//! the bank register (0xA13000: it maps the ROM or the save RAM at 0x200000) and the programmer's own settings. `--identify` is the exception: it
 //! sends flash command sequences (CFI query, autoselect, reset), never erase or program, and leaves the chip in
 //! read-array mode.
 use std::io::Write;
@@ -66,9 +67,12 @@ fn run() -> Result<(), String> {
     let dump = arg(&args, "--dump");
     let save = arg(&args, "--save");
     let identify = args.iter().any(|a| a == "--identify");
-    if !(info || header || identify || dump.is_some() || save.is_some()) {
+    let flash = arg(&args, "--flash");
+    let yes = args.iter().any(|a| a == "--yes");
+    if !(info || header || identify || dump.is_some() || save.is_some() || flash.is_some()) {
         println!("usage: zerocart-md --info | --header | --identify | --dump FILE [--size N] | --save FILE   [--port /dev/ttyUSB0]");
-        println!("nothing is erased or programmed; --identify only sends the chip's query, identifier and reset commands.");
+        println!("       zerocart-md --flash FILE --backup BACKUP.bin [--yes]   (a dry run unless --yes)");
+        println!("nothing is erased or programmed without --flash ... --yes; --identify only sends the chip's query, identifier and reset commands.");
         return Ok(());
     }
     let ports = krikzz::find_ports();
@@ -83,7 +87,7 @@ fn run() -> Result<(), String> {
     let t = SerialTransport::open(&port, 9600).map_err(|e| format!("{port}: {e}"))?;
     let mut kit = FlashKit::connect(t).map_err(|e| format!("handshake: {e}"))?;
     println!("handshake: FlashKit MD programmer answered with a valid id");
-    if info && !(header || identify || dump.is_some() || save.is_some()) {
+    if info && !(header || identify || dump.is_some() || save.is_some() || flash.is_some()) {
         return Ok(());
     }
 
@@ -149,6 +153,84 @@ fn run() -> Result<(), String> {
         println!("save RAM: {} bytes of data ({} bytes with the even bytes) written to {file}", data.len(), stream.len());
         println!("  note: a cartridge without a (battery-backed) save RAM reads noise here; this reader cannot cut the power to tell");
     }
+    if let Some(file) = flash {
+        flash_cartridge(&mut kit, &h, &file, arg(&args, "--backup"), yes)?;
+        return Ok(());
+    }
     println!("nothing was written to the cartridge (only the bank register and the programmer's settings).");
     Ok(())
+}
+
+/// Reads `len` bytes of the cartridge twice; the two reads must agree.
+fn read_stable<T: zerocart_core::Transport>(kit: &mut FlashKit<T>, len: usize) -> Result<Vec<u8>, String> {
+    let a = kit.read(0, len).map_err(|e| e.to_string())?;
+    let b = kit.read(0, len).map_err(|e| e.to_string())?;
+    if a != b {
+        let n = a.iter().zip(&b).filter(|(x, y)| x != y).count();
+        return Err(format!("two reads of the cartridge differ ({n} bytes): refusing to write"));
+    }
+    Ok(a)
+}
+
+fn flash_cartridge<T: zerocart_core::Transport>(
+    kit: &mut FlashKit<T>,
+    h: &MdHeader,
+    file: &str,
+    backup: Option<String>,
+    yes: bool,
+) -> Result<(), String> {
+    let backup = backup.ok_or("--backup FILE is required: what is overwritten is saved there first")?;
+    if Path::new(&backup).exists() {
+        return Err(format!("{backup} already exists: refusing to overwrite a backup"));
+    }
+    let image = std::fs::read(file).map_err(|e| format!("{file}: {e}"))?;
+    let geo = kit
+        .read_geometry()
+        .map_err(|e| e.to_string())?
+        .ok_or("the flash chip does not answer the CFI query (mask ROM or not a flash cartridge): nothing is written")?;
+    println!("chip: {} KiB, {} sectors, command set {}", geo.size_bytes / 1024, geo.sectors.len(), geo.command_set);
+    if geo.command_set != 2 {
+        return Err("only the AMD/Spansion command set is supported".into());
+    }
+    if image.is_empty() || image.len() % 2 != 0 || image.len() > geo.size_bytes {
+        return Err(format!("the file is {} bytes: it must be even and fit the {} bytes of the chip", image.len(), geo.size_bytes));
+    }
+    let used: Vec<(u32, u32)> = geo.sectors.iter().copied().filter(|s| (s.0 as usize) < image.len()).collect();
+    let extent = used.last().map(|s| (s.0 + s.1) as usize).ok_or("no sector")?;
+    println!("file: {file}, {} bytes; it covers {} sector(s), {} KiB of the chip", image.len(), used.len(), extent / 1024);
+    if !megadrive::parse_header(&image).is_some_and(|f| f.is_valid()) {
+        println!("  warning: the file has no valid Mega Drive header");
+    }
+    println!("cartridge now: {} ({})", h.title(), if h.is_valid() { "valid header" } else { "no valid header" });
+
+    println!("reading the {} KiB that will be overwritten, twice, for the backup...", extent / 1024);
+    let current = read_stable(kit, extent)?;
+    std::fs::write(&backup, &current).map_err(|e| e.to_string())?;
+    println!("backup written: {backup} (CRC32 {:08x})", zerocart_core::db::crc32(&current));
+    let mut want = image.clone();
+    want.resize(extent, 0xFF);
+    let differing = used.iter().filter(|&&(o, sz)| current[o as usize..(o + sz) as usize] != want[o as usize..(o + sz) as usize]).count();
+    println!("{differing} of {} sector(s) differ from the file", used.len());
+    if !yes {
+        println!("dry run: nothing was erased or written. Add --yes to write.");
+        return Ok(());
+    }
+    if differing == 0 {
+        println!("the cartridge already holds the file: nothing to do.");
+        return Ok(());
+    }
+    let t0 = std::time::Instant::now();
+    let report = kit
+        .flash_rom(&geo, &image, &mut |m, done, total| eprintln!("  [{done}/{total}] {m}"), &|| false)
+        .map_err(|e| format!("flash: {e} ; the previous content is in {backup}"))?;
+    println!("{} sector(s) rewritten, {} unchanged, {} retried, in {:.1} s", report.rewritten, report.unchanged, report.retried, t0.elapsed().as_secs_f32());
+    println!("verifying the whole {} KiB...", extent / 1024);
+    let after = kit.read(0, extent).map_err(|e| e.to_string())?;
+    if after == want {
+        println!("VERIFIED: the cartridge holds the file (CRC32 of the file {:08x}).", zerocart_core::db::crc32(&image));
+        Ok(())
+    } else {
+        let n = after.iter().zip(&want).filter(|(a, b)| a != b).count();
+        Err(format!("MISMATCH: {n} byte(s) differ from the file; the previous content is in {backup}"))
+    }
 }
