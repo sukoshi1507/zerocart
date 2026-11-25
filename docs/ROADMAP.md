@@ -149,3 +149,11 @@ indépendantes) ou ZeroCart l'embarque-t-il ? Dans le second cas, garder la lice
 d'origine dans THIRD_PARTY.md. Rien de ce qui sort de l'appareil ne doit partir sans une confirmation explicite à l'écran
 (même règle que pour les écritures de cartouche) : ce sont des fichiers personnels. ZeroSend se déclare non officiel et
 indépendant de LocalSend.
+
+## 4. ZeroSend embarqué dans ZeroCart (décision de l'utilisateur, 2026-11-25)
+
+Réimplémentation du protocole LocalSend v2 EN RUST dans ZeroCart (pas d'appel de la version Python), après le branchement de
+l'écriture Mega Drive (fait côté code, voir ci-dessus ; à essayer sur la carte). Reprendre les notes de la section 3 :
+découverte par multicast `224.0.0.167:53317`, serveur HTTPS (`register`, `info`, `prepare-upload`, `upload`, `cancel`),
+certificat auto-signé généré au premier démarrage dont le SHA-256 est l'empreinte, mTLS exigé par LocalSend 1.18+ pour
+l'envoi. Licence de ZeroSend : MIT, mention d'origine dans THIRD_PARTY.md. Tout envoi demande une confirmation à l'écran.
