@@ -120,3 +120,32 @@ Options de test : `zerocart-app --reader gbx|chis|krikzz --system gb|gbc|gba|md`
 `--png X --screen splash|system|readers|readers-none|placeholder` rend un écran sans l'appareil.
 Reste : brancher la lecture / le flash du Mega Drive dans l'application (API krikzz.rs), les rendus à affiner avec
 l'utilisateur (icônes, textes, anglais), essais avec le GBFlash.
+
+## 3. Partage de fichiers avec ZeroSend (LocalSend) : à intégrer (noté le 2026-11-25, pas commencé)
+
+Dépôt : https://github.com/InstantComet/zerosend (Python, licence MIT, dernier push le 2026-11-19). C'est une application
+APPLaunch pour le CardputerZero qui parle le protocole ouvert **LocalSend v2** : l'appareil apparaît dans l'application
+LocalSend d'un téléphone ou d'un PC du même Wi-Fi, sans passer par un serveur. Elle reçoit (acceptation par Y/N, fichiers
+dans `~/Downloads`) et envoie (découverte par multicast `224.0.0.167:53317`, ou par adresse IP). Elle ne tourne que pendant
+qu'elle est ouverte. Dépend de `python3-pil` et `python3-cryptography` (présents sur l'image de série). Une ligne de commande
+existe : `python3 app/app.py --send IP[:port] CHEMIN|text:MESSAGE` et `--serve` (réception, accepte tout).
+
+Ce que ça apporterait à ZeroCart (idées de l'utilisateur à préciser avec lui) :
+- **Sortir** les dumps de ROM, les sauvegardes (`.sav`) et les sauvegardes avant écriture (`backups/`) vers un téléphone ou
+  un PC, sans câble ni carte SD.
+- **Entrer** des ROM à flasher : le sélecteur de fichiers de ZeroCart pourrait aussi proposer `~/Downloads`, où ZeroSend
+  dépose ce qu'il reçoit.
+
+Pistes d'intégration, de la plus simple à la plus lourde :
+1. **Couplage lâche, sans code** : ZeroCart lit/écrit dans les dossiers que ZeroSend utilise (`~/Downloads`) et le dit à
+   l'utilisateur à la fin d'un dump (« envoyez-le avec ZeroSend »). Aucune dépendance nouvelle.
+2. **Appel de la ligne de commande** : après un dump, proposer « Envoyer… » qui lance `zerosend --send` (Python requis, déjà
+   là). Il faut choisir l'appareil cible (multicast ou IP saisie) : cela demande un petit écran de sélection.
+3. **Réimplémentation en Rust** du protocole LocalSend v2 (HTTPS, certificat généré au premier démarrage dont le SHA-256 sert
+   d'empreinte, mTLS exigé par LocalSend 1.18+ pour l'envoi) : lourd, à ne faire que si l'on veut un binaire unique.
+
+Points à trancher avec l'utilisateur : ZeroSend reste-t-il une application séparée du store (recommandé : trois applications
+indépendantes) ou ZeroCart l'embarque-t-il ? Dans le second cas, garder la licence MIT de ZeroSend et la mention
+d'origine dans THIRD_PARTY.md. Rien de ce qui sort de l'appareil ne doit partir sans une confirmation explicite à l'écran
+(même règle que pour les écritures de cartouche) : ce sont des fichiers personnels. ZeroSend se déclare non officiel et
+indépendant de LocalSend.

@@ -119,6 +119,10 @@ pub struct FlashReport {
     pub retried: usize,
 }
 
+/// Where a standard Mega Drive cartridge ends: 0x400000-0x7FFFFF is the Mega-CD's. A flash chip of 8 MiB on a
+/// cartridge wired as a 4 MiB one still reads (as 0xFF) up there, but nothing can be erased or programmed.
+pub const UPPER_HALF: usize = 0x400000;
+
 /// Bytes of one programming block (the reference client programs 4 KiB at a time).
 pub const PROGRAM_BLOCK: usize = 4096;
 /// A sector erase answers only when the chip is ready again (up to a few seconds on a large sector).
@@ -329,6 +333,7 @@ impl<T: Transport> FlashKit<T> {
     /// the reset command are sent. `None`: the chip does not answer the query.
     pub fn read_geometry(&mut self) -> Result<Option<FlashGeometry>> {
         let table = (|| -> Result<Vec<u8>> {
+            self.flash_reset()?; // a chip left in another mode (bypass, autoselect) would not answer the query
             self.write_byte(0x55 * 2, 0x98)?;
             let t = self.read(0x20, 0x5A)?; // words 0x10..=0x3A
             self.write_word(0, 0xF0)?;
@@ -430,6 +435,31 @@ impl<T: Transport> FlashKit<T> {
         result.and(reset)
     }
 
+    /// Whether the chip can be written above 0x400000 on this cartridge. A blank sector there is erased, a 4-byte
+    /// pattern is programmed and read back, then the sector is erased again: the cartridge is left as it was. If
+    /// that sector already holds data, it was written before, so the half is writable. A chip of 4 MiB or less has no
+    /// upper half (`false`).
+    pub fn upper_half_writable(&mut self, geometry: &FlashGeometry) -> Result<bool> {
+        let Some(&(off, size)) = geometry.sectors.iter().find(|s| s.0 as usize >= UPPER_HALF) else {
+            return Ok(false);
+        };
+        self.set_delay(1)?;
+        let held = self.read(off, size as usize)?;
+        if held.iter().any(|&b| b != 0xFF) {
+            return Ok(true);
+        }
+        self.set_delay(0)?;
+        self.erase_sector(off)?;
+        self.program(off, &[0xA5, 0x5A, 0x3C, 0xC3])?;
+        let back = self.read(off, 4)?;
+        self.erase_sector(off)?;
+        let blank = self.read(off, size as usize)?.iter().all(|&b| b == 0xFF);
+        if !blank {
+            return Err(invalid("the test sector above 0x400000 did not erase back to blank"));
+        }
+        Ok(back == [0xA5, 0x5A, 0x3C, 0xC3])
+    }
+
     /// DESTRUCTIVE. Writes `image` at offset 0 of the flash cartridge: the sectors that hold it are compared with the
     /// image (padded with 0xFF to the end of its last sector) and only the ones that differ are erased and
     /// programmed, each read back (one retry). `geometry` must come from [`read_geometry`](Self::read_geometry) of
@@ -448,6 +478,13 @@ impl<T: Transport> FlashKit<T> {
         if image.is_empty() || image.len() % 2 != 0 || image.len() > geometry.size_bytes {
             return Err(invalid("the image is empty, odd, or larger than the flash chip: nothing is erased"));
         }
+        self.set_delay(0)?;
+        self.write_word(BANK_REGISTER, 0x0000)?;
+        if image.len() > UPPER_HALF && !self.upper_half_writable(geometry)? {
+            return Err(invalid(
+                "the upper half of the chip (0x400000 and above) cannot be written on this cartridge (wired as a 4 MiB cartridge): nothing is erased",
+            ));
+        }
         let used = geometry.used_sectors(image.len());
         let target = |off: u32, size: u32| -> Vec<u8> {
             let (o, e) = (off as usize, (off as usize + size as usize).min(image.len()));
@@ -455,8 +492,6 @@ impl<T: Transport> FlashKit<T> {
             t.resize(size as usize, 0xFF);
             t
         };
-        self.set_delay(0)?;
-        self.write_word(BANK_REGISTER, 0x0000)?;
         let mut report = FlashReport::default();
         let result = (|| -> Result<()> {
             for (i, &(off, size)) in used.iter().enumerate() {
@@ -599,13 +634,16 @@ mod tests {
         log: Vec<u8>,
         /// Start offsets of the sectors erased, in order.
         erased: Vec<usize>,
+        /// The upper half of the chip cannot be written (a cartridge wired as 4 MiB): erase and program are ignored.
+        upper_dead: bool,
+        erased_ignored: usize,
     }
 
     impl Sim {
         fn new(rom: Vec<u8>) -> Self {
             Self {
                 id: [0x42, 0x42], rom, sram: vec![0; 0x4000], bank: 0, addr: 0, len: 0, delay: 0, rx: vec![],
-                out: VecDeque::new(), chip: Chip::Array, flash: false, unlock: vec![], writes: vec![], log: vec![], erased: vec![],
+                out: VecDeque::new(), chip: Chip::Array, flash: false, unlock: vec![], writes: vec![], log: vec![], erased: vec![], upper_dead: false, erased_ignored: 0,
             }
         }
 
@@ -631,6 +669,7 @@ mod tests {
                 (Chip::Cfi, 0x2C) => 1, // one region of uniform 64 KiB sectors
                 (Chip::Cfi, 0x2D) => (self.rom.len() / SECTOR - 1) as u16,
                 (Chip::Cfi, 0x30) => 0x0001,
+                (Chip::Cfi, 0x10..=0x3F) => 0, // CFI words that are not listed above read as zero
                 (Chip::Autoselect, 0x00) => 0x0001,
                 (Chip::Autoselect, 0x01) => 0x227E,
                 (Chip::Autoselect, 0x0E) => 0x2210,
@@ -653,6 +692,10 @@ mod tests {
                 return;
             }
             if !self.flash {
+                return;
+            }
+            if self.upper_dead && a as usize * 2 >= UPPER_HALF && !matches!((a, v), (0x555, _) | (0x2AA, _) | (0, _) | (0x55, _)) {
+                self.erased_ignored += 1;
                 return;
             }
             match (self.chip, a, v) {
@@ -1029,6 +1072,62 @@ mod tests {
         assert!(s.rom[0x20000..0x30000].iter().all(|&b| b == 0xFF));
         // a program command is "A0" in bypass mode: it was sent for no sector
         assert!(!s.writes.iter().any(|&(_, v)| v == 0xA0), "no programming for a blank target");
+    }
+
+    /// A 8 MiB chip of uniform 64 KiB sectors; with `upper_dead` the cartridge is wired as a 4 MiB one. The lower
+    /// 4 MiB hold data, the upper half is blank.
+    fn eight_mib(upper_dead: bool) -> FlashKit<Sim> {
+        let mut rom = vec![0xFFu8; 8 << 20];
+        for (i, b) in rom.iter_mut().enumerate().take(UPPER_HALF) {
+            *b = (i * 7 + (i >> 9)) as u8;
+        }
+        let mut s = Sim::new(rom);
+        s.flash = true;
+        s.upper_dead = upper_dead;
+        FlashKit::connect(s).unwrap()
+    }
+
+    #[test]
+    fn a_dead_upper_half_is_detected_before_anything_is_erased_and_the_probe_leaves_no_trace() {
+        let mut k = eight_mib(true);
+        let g = k.read_geometry().unwrap().unwrap();
+        let before = k.t.rom.clone();
+        assert!(!k.upper_half_writable(&g).unwrap());
+        assert_eq!(k.t.rom, before, "the probe leaves the cartridge as it was");
+        // an image that reaches above 0x400000 is refused up front, with no erase at all
+        let image = vec![0x11u8; 0x410000];
+        let e = k.flash_rom(&g, &image, &mut |_, _, _| {}, &|| false).unwrap_err();
+        assert!(e.to_string().contains("upper half"), "{e}");
+        let s = k.into_inner();
+        assert!(s.erased.is_empty(), "no sector was erased: {:?}", s.erased);
+        assert_eq!(s.rom, before);
+    }
+
+    #[test]
+    fn a_writable_upper_half_is_probed_without_a_trace_and_the_image_is_written() {
+        let mut k = eight_mib(false);
+        let g = k.read_geometry().unwrap().unwrap();
+        let before = k.t.rom.clone();
+        assert!(k.upper_half_writable(&g).unwrap());
+        assert_eq!(k.t.rom, before);
+        let mut image = before[..UPPER_HALF].to_vec();
+        image.extend(std::iter::repeat(0x77).take(0x20000)); // two sectors above 0x400000
+        let r = k.flash_rom(&g, &image, &mut |_, _, _| {}, &|| false).unwrap();
+        assert_eq!(r.rewritten, 2);
+        let s = k.into_inner();
+        assert_eq!(s.rom[UPPER_HALF..UPPER_HALF + 0x20000], image[UPPER_HALF..]);
+    }
+
+    #[test]
+    fn an_image_that_stays_below_0x400000_never_probes_the_upper_half() {
+        let mut k = eight_mib(true);
+        let g = k.read_geometry().unwrap().unwrap();
+        let mut image = k.t.rom[..0x100000].to_vec();
+        image[0x10] ^= 0xFF;
+        k.flash_rom(&g, &image, &mut |_, _, _| {}, &|| false).unwrap();
+        let s = k.into_inner();
+        assert!(s.erased.iter().all(|&o| o < 0x100000));
+        assert_eq!(s.erased_ignored, 0, "nothing was sent to the upper half");
     }
 
     #[test]

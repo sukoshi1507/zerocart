@@ -7,6 +7,7 @@
 //!   zerocart-md --save FILE                read the save RAM declared by the header
 //!   zerocart-md --identify                 identify the flash chip (CFI query + autoselect + reset commands only)
 //!   zerocart-md --flash FILE --backup OUT  DESTRUCTIVE: write FILE to a flash cartridge; a dry run unless --yes
+//!   zerocart-md --sector-test OFFSET [--yes]  DIAGNOSTIC: erase, program and restore ONE sector, reading back at each step
 //!   common: --port /dev/ttyUSB0 (default: the first FTDI 0403:6001 found)
 //!
 //! Except with `--flash ... --yes`, it never erases, programs or writes data to a cartridge: the only bus writes are
@@ -69,7 +70,8 @@ fn run() -> Result<(), String> {
     let identify = args.iter().any(|a| a == "--identify");
     let flash = arg(&args, "--flash");
     let yes = args.iter().any(|a| a == "--yes");
-    if !(info || header || identify || dump.is_some() || save.is_some() || flash.is_some()) {
+    let sector_test = arg(&args, "--sector-test");
+    if !(sector_test.is_some() || info || header || identify || dump.is_some() || save.is_some() || flash.is_some()) {
         println!("usage: zerocart-md --info | --header | --identify | --dump FILE [--size N] | --save FILE   [--port /dev/ttyUSB0]");
         println!("       zerocart-md --flash FILE --backup BACKUP.bin [--yes]   (a dry run unless --yes)");
         println!("nothing is erased or programmed without --flash ... --yes; --identify only sends the chip's query, identifier and reset commands.");
@@ -153,6 +155,14 @@ fn run() -> Result<(), String> {
         println!("save RAM: {} bytes of data ({} bytes with the even bytes) written to {file}", data.len(), stream.len());
         println!("  note: a cartridge without a (battery-backed) save RAM reads noise here; this reader cannot cut the power to tell");
     }
+    if let Some(off) = sector_test {
+        let off = match off.trim().strip_prefix("0x") {
+            Some(hex) => u32::from_str_radix(hex, 16),
+            None => off.trim().parse(),
+        }
+        .map_err(|e| format!("--sector-test: {e}"))?;
+        return sector_test_run(&mut kit, off, yes);
+    }
     if let Some(file) = flash {
         flash_cartridge(&mut kit, &h, &file, arg(&args, "--backup"), yes)?;
         return Ok(());
@@ -222,4 +232,48 @@ fn flash_cartridge<T: zerocart_core::Transport>(
         let n = after.iter().zip(&want).filter(|(a, b)| a != b).count();
         Err(format!("MISMATCH: {n} byte(s) differ from the file; the previous content is in {backup}"))
     }
+}
+
+/// DIAGNOSTIC for one sector: erase, program a pattern, restore the original content, reading back at each step with
+/// both bus delays. The original content is read first and put back at the end.
+fn sector_test_run<T: zerocart_core::Transport>(kit: &mut FlashKit<T>, offset: u32, yes: bool) -> Result<(), String> {
+    let geo = kit.read_geometry().map_err(|e| e.to_string())?.ok_or("the chip does not answer the CFI query")?;
+    let &(off, size) = geo.sectors.iter().find(|s| offset >= s.0 && offset < s.0 + s.1).ok_or("offset beyond the chip")?;
+    println!("sector at 0x{off:X}, {size} bytes (index {})", geo.sectors.iter().position(|s| s.0 == off).unwrap());
+    let rd = |kit: &mut FlashKit<T>, delay: u8| -> Result<Vec<u8>, String> {
+        kit.set_delay(delay).map_err(|e| e.to_string())?;
+        kit.read(off, size as usize).map_err(|e| e.to_string())
+    };
+    let orig = rd(kit, 1)?;
+    let orig0 = rd(kit, 0)?;
+    println!("original content: {} non-FF bytes; the same read at delay 0: {}", orig.iter().filter(|&&b| b != 0xFF).count(),
+        if orig == orig0 { "identical" } else { "DIFFERENT" });
+    if !yes {
+        println!("dry run: nothing was erased. Add --yes to run the test (the sector is restored at the end).");
+        return Ok(());
+    }
+    kit.erase_sector(off).map_err(|e| format!("erase: {e}"))?;
+    let (b1, b0) = (rd(kit, 1)?, rd(kit, 0)?);
+    println!("after the erase: delay 1 {} non-FF, delay 0 {} non-FF", b1.iter().filter(|&&b| b != 0xFF).count(), b0.iter().filter(|&&b| b != 0xFF).count());
+    let pattern: Vec<u8> = (0..256usize).map(|i| (i as u8) ^ 0xA5).collect();
+    kit.set_delay(0).map_err(|e| e.to_string())?;
+    kit.program(off, &pattern).map_err(|e| format!("program: {e}"))?;
+    let (p1, p0) = (rd(kit, 1)?, rd(kit, 0)?);
+    println!("after programming 256 bytes: delay 1 {}, delay 0 {}", if p1[..256] == pattern[..] { "matches" } else { "DIFFERS" }, if p0[..256] == pattern[..] { "matches" } else { "DIFFERS" });
+    if p1[..256] != pattern[..] {
+        let first = p1[..256].iter().zip(&pattern).position(|(a, b)| a != b).unwrap();
+        println!("  first difference at +{first}: read {:02X?} expected {:02X?}", &p1[first..(first + 8).min(256)], &pattern[first..(first + 8).min(256)]);
+    }
+    println!("restoring the original content...");
+    kit.set_delay(0).map_err(|e| e.to_string())?;
+    kit.erase_sector(off).map_err(|e| format!("erase: {e}"))?;
+    if orig.iter().any(|&b| b != 0xFF) {
+        kit.program(off, &orig).map_err(|e| format!("restore: {e}"))?;
+    }
+    let back = rd(kit, 1)?;
+    println!("restored: {}", if back == orig { "identical to the original" } else { "DIFFERS from the original" });
+    if back != orig {
+        return Err("the sector could not be restored".into());
+    }
+    Ok(())
 }
