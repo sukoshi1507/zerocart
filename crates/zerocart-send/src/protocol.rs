@@ -38,7 +38,24 @@ pub struct DeviceInfo {
     pub announcement: Option<bool>,
 }
 
+/// Text that came from the network, made safe to show on a small screen: control characters become spaces, runs of
+/// spaces collapse, and it is cut to `max` characters.
+pub fn clean_text(s: &str, max: usize) -> String {
+    let spaced: String = s.chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
+    spaced.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(max).collect()
+}
+
 impl DeviceInfo {
+    /// The same description with the texts made safe to show (see [`clean_text`]); an empty alias becomes `fallback`.
+    pub fn cleaned(mut self, fallback: &str) -> Self {
+        self.alias = clean_text(&self.alias, 40);
+        if self.alias.is_empty() {
+            self.alias = fallback.to_string();
+        }
+        self.device_model = self.device_model.map(|m| clean_text(&m, 40));
+        self
+    }
+
     /// The description of this device (`http_fields`: with the port and protocol, as in multicast and `register`).
     pub fn this_device(alias: &str, fingerprint: &str, http_fields: bool) -> Self {
         Self {
@@ -113,6 +130,16 @@ mod tests {
         assert!(v.get("announce").is_none(), "absent unless set");
         let bare = serde_json::to_value(DeviceInfo::this_device("ZeroCart", "ABCD", false)).unwrap();
         assert!(bare.get("port").is_none() && bare.get("protocol").is_none(), "the info endpoint has no port or protocol");
+    }
+
+    #[test]
+    fn texts_from_the_network_are_made_safe_to_show() {
+        assert_eq!(clean_text("Pixel\u{7}  8\n\r\t(Laurent)", 40), "Pixel 8 (Laurent)");
+        assert_eq!(clean_text(&"x".repeat(100), 40).chars().count(), 40);
+        assert_eq!(clean_text("日本語のテキスト", 3), "日本語");
+        assert_eq!(clean_text("\u{0}\u{1b}[31m", 10), "[31m");
+        let d = DeviceInfo::this_device("\u{7}\n", "F", true).cleaned("192.168.1.5");
+        assert_eq!(d.alias, "192.168.1.5", "an empty alias is replaced");
     }
 
     #[test]

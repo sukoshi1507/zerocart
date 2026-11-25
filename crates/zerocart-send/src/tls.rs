@@ -96,6 +96,34 @@ pub fn wrap_client(config: Arc<ClientConfig>, tcp: TcpStream) -> io::Result<Box<
     Ok(Box::new(rustls::StreamOwned::new(conn, tcp)))
 }
 
+/// Most connections served at the same time: a device that opens many more is not a LocalSend client, and each one
+/// costs a thread on a small machine.
+pub const MAX_CONNECTIONS: usize = 16;
+
+/// A place among the [`MAX_CONNECTIONS`], given back when dropped.
+pub struct Slot(Arc<std::sync::atomic::AtomicUsize>);
+
+impl Slot {
+    pub fn try_acquire(counter: &Arc<std::sync::atomic::AtomicUsize>, max: usize) -> Option<Slot> {
+        let mut now = counter.load(Ordering::SeqCst);
+        loop {
+            if now >= max {
+                return None;
+            }
+            match counter.compare_exchange(now, now + 1, Ordering::SeqCst, Ordering::SeqCst) {
+                Ok(_) => return Some(Slot(counter.clone())),
+                Err(actual) => now = actual,
+            }
+        }
+    }
+}
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 /// The running HTTPS server.
 pub struct Server {
     stop: Arc<AtomicBool>,
@@ -127,12 +155,15 @@ pub fn serve<U: Ui + 'static>(receiver: Arc<Receiver<U>>, id: &Identity, bind: S
     let addr = listener.local_addr()?;
     let stop = Arc::new(AtomicBool::new(false));
     let flag = stop.clone();
+    let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let thread = std::thread::spawn(move || {
         while !flag.load(Ordering::SeqCst) {
             match listener.accept() {
                 Ok((tcp, from)) => {
+                    let Some(slot) = Slot::try_acquire(&active, MAX_CONNECTIONS) else { continue }; // too many: close it
                     let (receiver, config) = (receiver.clone(), config.clone());
                     std::thread::spawn(move || {
+                        let _slot = slot;
                         let _ = tcp.set_nonblocking(false);
                         let _ = tcp.set_read_timeout(Some(Duration::from_secs(120)));
                         let _ = tcp.set_write_timeout(Some(Duration::from_secs(120)));
@@ -231,6 +262,16 @@ mod tests {
         let p = dir.join(name);
         std::fs::write(&p, data).unwrap();
         Outgoing::from_path(&p).unwrap()
+    }
+
+    #[test]
+    fn the_connection_slots_are_limited_and_given_back() {
+        let counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let held: Vec<Slot> = (0..3).map(|_| Slot::try_acquire(&counter, 3).unwrap()).collect();
+        assert!(Slot::try_acquire(&counter, 3).is_none(), "a fourth connection is refused");
+        drop(held);
+        assert_eq!(counter.load(Ordering::SeqCst), 0);
+        assert!(Slot::try_acquire(&counter, 3).is_some(), "the slots are free again");
     }
 
     #[test]

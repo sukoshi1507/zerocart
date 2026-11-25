@@ -61,6 +61,24 @@ pub fn safe_relative(name: &str) -> PathBuf {
     p
 }
 
+/// Reserves a name like [`unique_path`] but atomically: the file is created (empty) so that two uploads that finish at
+/// the same time cannot choose the same name. The caller then renames its finished file over it.
+pub fn claim_unique(path: &Path) -> io::Result<PathBuf> {
+    let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    let ext = path.extension().map(|e| format!(".{}", e.to_string_lossy())).unwrap_or_default();
+    let candidates = std::iter::once(path.to_path_buf())
+        .chain((1..10000).map(|i| path.with_file_name(format!("{stem} ({i}){ext}"))))
+        .chain(std::iter::once(path.with_file_name(format!("{stem} {}{ext}", random_hex(3)))));
+    for c in candidates {
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&c) {
+            Ok(_) => return Ok(c),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Err(io::Error::other("no free file name"))
+}
+
 /// `path`, or `name (1).ext`, `name (2).ext`... : an existing file is never replaced.
 pub fn unique_path(path: &Path) -> PathBuf {
     if !path.exists() {
@@ -134,7 +152,7 @@ impl<U: Ui> Receiver<U> {
     }
 
     fn register<R: BufRead>(&self, body: &mut Body<'_, R>, ip: IpAddr) -> io::Result<(u16, Option<Value>)> {
-        let info: DeviceInfo = serde_json::from_value(body.json()?).map_err(io::Error::other)?;
+        let info: DeviceInfo = serde_json::from_value::<DeviceInfo>(body.json()?).map_err(io::Error::other)?.cleaned(&ip.to_string());
         self.ui.peer_seen(&info, ip);
         Ok((200, Some(self.info())))
     }
@@ -144,13 +162,14 @@ impl<U: Ui> Receiver<U> {
         if request.files.is_empty() {
             return Err(io::Error::other("no files"));
         }
+        let request = PrepareUploadRequest { info: request.info.cleaned(&ip.to_string()), files: request.files };
         self.ui.peer_seen(&request.info, ip);
         // a single text file with a preview is a message: shown, nothing to transfer
         let metas: Vec<&FileMeta> = request.files.values().collect();
         if let [one] = metas.as_slice() {
             if one.file_type.starts_with("text/") {
                 if let Some(text) = &one.preview {
-                    self.ui.message(&request.info, text);
+                    self.ui.message(&request.info, &crate::protocol::clean_text(text, 500));
                     return Ok((204, None));
                 }
             }
@@ -198,7 +217,9 @@ impl<U: Ui> Receiver<U> {
         };
         let relative = safe_relative(&meta.file_name);
         let target = self.downloads.join(&relative);
-        let part = target.with_file_name(format!(".{}.part", target.file_name().map(|n| n.to_string_lossy()).unwrap_or_default()));
+        // the id is in the name: two files of one session with the same name do not share their temporary file
+        let id_part: String = meta.id.chars().filter(|c| c.is_ascii_alphanumeric()).take(16).collect();
+        let part = target.with_file_name(format!(".{}.{id_part}.part", target.file_name().map(|n| n.to_string_lossy()).unwrap_or_default()));
         if let Some(dir) = target.parent() {
             std::fs::create_dir_all(dir)?;
         }
@@ -212,19 +233,26 @@ impl<U: Ui> Receiver<U> {
                 if n == 0 {
                     break;
                 }
+                received += n as u64;
+                if received > meta.size {
+                    // more than the user accepted (the size was shown on screen): stop, keep nothing
+                    return Err(io::Error::new(io::ErrorKind::FileTooLarge, "more data than announced"));
+                }
                 out.write_all(&buf[..n])?;
                 if let Some(h) = hasher.as_mut() {
                     h.update(&buf[..n]);
                 }
-                received += n as u64;
                 self.ui.progress(&meta.file_name, received, meta.size);
             }
             out.flush()
         })();
         if let Err(e) = result {
             let _ = std::fs::remove_file(&part);
-            let _ = e;
-            return Ok((500, None));
+            return Ok((if e.kind() == io::ErrorKind::FileTooLarge { 413 } else { 500 }, None));
+        }
+        if received != meta.size {
+            let _ = std::fs::remove_file(&part);
+            return Ok((422, None)); // fewer bytes than announced
         }
         if let (Some(h), Some(want)) = (hasher, meta.sha256.as_ref()) {
             if hex(&h.finalize()) != want.to_ascii_lowercase() {
@@ -232,8 +260,13 @@ impl<U: Ui> Receiver<U> {
                 return Ok((422, None));
             }
         }
-        let final_path = unique_path(&target);
-        std::fs::rename(&part, &final_path)?;
+        let final_path = match claim_unique(&target).and_then(|p| std::fs::rename(&part, &p).map(|_| p)) {
+            Ok(p) => p,
+            Err(_) => {
+                let _ = std::fs::remove_file(&part);
+                return Ok((500, None));
+            }
+        };
         {
             let mut s = self.session.lock().unwrap();
             if let Some(session) = s.as_mut() {
@@ -526,6 +559,51 @@ mod tests {
         assert_eq!(a[0].0, 400);
         let a = run(&r, vec![post("/api/localsend/v2/prepare-upload", r#"{"info":{"alias":"A","fingerprint":"F"},"files":{}}"#)]);
         assert_eq!(a[0].0, 400, "no files");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn more_or_fewer_bytes_than_announced_are_refused_and_leave_no_file() {
+        let d = dir("size");
+        let (r, _) = receiver(true, &d);
+        for (announced, sent, status) in [(3u64, &b"abcdef"[..], 413u16), (6, &b"abc"[..], 422), (0, &b"x"[..], 413)] {
+            let a = run(&r, vec![post("/api/localsend/v2/prepare-upload", &prepare_body(&[("f1", "a.bin", announced, None)]))]);
+            let ans: PrepareUploadResponse = serde_json::from_str(&a[0].1).unwrap();
+            // a sized body cut by Content-Length: the receiver sees exactly `sent` bytes
+            let b = run(&r, vec![upload_request(&ans.session_id, "f1", &ans.files["f1"], sent)]);
+            assert_eq!(b[0].0, status, "announced {announced}, sent {}", sent.len());
+            assert_eq!(std::fs::read_dir(&d).unwrap().count(), 0, "no file and no .part left");
+            // the session is still open: cancel it so the next round can start
+            run(&r, vec![format!("POST /api/localsend/v2/cancel?sessionId={} HTTP/1.1\r\nContent-Length: 0\r\n\r\n", ans.session_id).into_bytes()]);
+        }
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn two_files_with_the_same_name_in_one_session_do_not_clash() {
+        let d = dir("same");
+        let (r, _) = receiver(true, &d);
+        let body = prepare_body(&[("f1", "same.bin", 3, None), ("f2", "same.bin", 3, None)]);
+        let a = run(&r, vec![post("/api/localsend/v2/prepare-upload", &body)]);
+        let ans: PrepareUploadResponse = serde_json::from_str(&a[0].1).unwrap();
+        let b = run(&r, vec![upload_request(&ans.session_id, "f1", &ans.files["f1"], b"one"), upload_request(&ans.session_id, "f2", &ans.files["f2"], b"two")]);
+        assert_eq!((b[0].0, b[1].0), (200, 200));
+        assert_eq!(std::fs::read(d.join("same.bin")).unwrap(), b"one");
+        assert_eq!(std::fs::read(d.join("same (1).bin")).unwrap(), b"two");
+        assert_eq!(std::fs::read_dir(&d).unwrap().count(), 2, "no temporary file left");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn concurrent_claims_of_one_name_all_get_different_files() {
+        let d = dir("claim");
+        let base = d.join("x.bin");
+        let handles: Vec<_> = (0..12).map(|_| { let b = base.clone(); std::thread::spawn(move || claim_unique(&b).unwrap()) }).collect();
+        let mut names: Vec<PathBuf> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        names.sort();
+        names.dedup();
+        assert_eq!(names.len(), 12, "every claim got its own name");
+        assert!(names.iter().all(|n| n.exists()));
         let _ = std::fs::remove_dir_all(&d);
     }
 

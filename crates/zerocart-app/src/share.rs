@@ -153,7 +153,7 @@ impl ShareUi {
 impl Ui for ShareUi {
     fn ask(&self, from: &DeviceInfo, _ip: std::net::IpAddr, files: &[FileMeta]) -> bool {
         let (answer, wait) = channel();
-        self.send(ShareEvent::Incoming { from: from.alias.clone(), files: files.iter().map(|f| (f.file_name.clone(), f.size)).collect(), answer });
+        self.send(ShareEvent::Incoming { from: from.alias.clone(), files: files.iter().map(|f| (zerocart_send::protocol::clean_text(&f.file_name, 80), f.size)).collect(), answer });
         wait.recv_timeout(ASK_TIMEOUT).unwrap_or(false)
     }
     fn message(&self, from: &DeviceInfo, text: &str) {

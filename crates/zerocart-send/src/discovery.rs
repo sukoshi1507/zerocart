@@ -30,6 +30,7 @@ impl Peers {
         if info.fingerprint == self.own_fingerprint {
             return None;
         }
+        let info = info.cleaned(&ip.to_string()); // what a device calls itself is shown on our screen
         let port = info.port.unwrap_or(PORT);
         let mut map = self.map.lock().unwrap();
         let was_manual = map.get(&info.fingerprint).is_some_and(|e| e.1);
@@ -211,6 +212,16 @@ mod tests {
         // another port on the same address is another device
         peers.add(device("Second", "C3", 40000), ip, false).unwrap();
         assert_eq!(peers.list().len(), 3);
+    }
+
+    #[test]
+    fn what_a_device_calls_itself_is_cleaned_before_it_is_listed() {
+        let peers = Peers::new("ME");
+        let ip: IpAddr = "192.168.1.30".parse().unwrap();
+        let p = peers.add(device("Evil\u{1b}[2J\nname", "E1", 53317), ip, false).unwrap();
+        assert_eq!(p.info.alias, "Evil [2J name");
+        let q = peers.add(device("   ", "E2", 40000), ip, false).unwrap();
+        assert_eq!(q.info.alias, "192.168.1.30");
     }
 
     #[test]
