@@ -17,9 +17,17 @@ use crate::transport::{read_exact, Transport};
 use crate::{Error, Result};
 use std::time::Duration;
 
-/// FTDI's USB vendor id: the programmer is an FTDI USB-serial device (`/dev/ttyUSB*`). The product id is NOT
-/// recorded here: read it from the user's board before filtering ports on it.
+/// FTDI's USB vendor id: the programmer is an FTDI USB-serial device (`/dev/ttyUSB*`).
 pub const USB_VID_FTDI: u16 = 0x0403;
+/// Product id of the user's board (read 2026-11-25: FTDI "FT245R USB FIFO", 0403:6001, `/dev/ttyUSB0`). It is the
+/// generic FT232R/FT245R id, shared by other FTDI adapters: a port found by it is only a candidate, [`FlashKit::connect`]
+/// checks the programmer's id before anything else is sent.
+pub const USB_PID: u16 = 0x6001;
+
+/// `/dev/ttyUSB*` with the USB ids of the programmer (candidates: see [`USB_PID`]).
+pub fn find_ports() -> Vec<String> {
+    crate::transport::find_ports_in(std::path::Path::new("/sys/class/tty"), &[(USB_VID_FTDI, USB_PID)])
+}
 
 mod wire {
     pub const CMD_ADDR: u8 = 0;
@@ -508,6 +516,20 @@ mod tests {
 
     fn kit(rom: Vec<u8>) -> FlashKit<Sim> {
         FlashKit::connect(Sim::new(rom)).unwrap()
+    }
+
+    #[test]
+    fn ports_are_found_by_the_ftdi_ids_and_the_gbxcart_ch340_is_not_one() {
+        let root = std::env::temp_dir().join(format!("zerocart-krikzz-ports-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for (tty, vid, pid) in [("ttyUSB0", "0403", "6001"), ("ttyUSB1", "1a86", "7523"), ("ttyACM0", "0483", "0721")] {
+            let dev = root.join(tty).join("device");
+            std::fs::create_dir_all(&dev).unwrap();
+            std::fs::write(dev.join("idVendor"), format!("{vid}\n")).unwrap();
+            std::fs::write(dev.join("idProduct"), format!("{pid}\n")).unwrap();
+        }
+        assert_eq!(crate::transport::find_ports_in(&root, &[(USB_VID_FTDI, USB_PID)]), ["/dev/ttyUSB0"]);
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

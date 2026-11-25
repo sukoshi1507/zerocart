@@ -35,6 +35,10 @@ Conséquences de structure :
 Support à prévoir pour la carte de flashage des cartouches Mega Drive de Krikzz. Code de référence à porter en Rust :
 https://github.com/jfryman/flashkit-md-dotnet (C#/.NET, licence MIT).
 
+La carte de l'utilisateur est un FTDI « FT245R USB FIFO », USB 0403:6001, `/dev/ttyUSB0` (relevé le 2026-11-25) ; ce
+PID est celui, générique, des FT232R/FT245R : la poignée de main (identifiant à deux octets égaux et non nuls) confirme
+que c'est bien le programmeur. `krikzz::find_ports()` filtre dessus.
+
 Côté lecture, le protocole est écrit et testé contre un simulateur (2026-11-25), PAS encore branché dans l'application
 ni essayé sur la carte : `zerocart-core/src/krikzz.rs` (`FlashKit<T>` : poignée de main, lecture de mots et de blocs,
 en-tête, dump de ROM avec CRC-32 et checksum Mega Drive, lecture de la sauvegarde par le registre 0xA13000,
