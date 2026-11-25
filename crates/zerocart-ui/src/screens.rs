@@ -39,7 +39,7 @@ pub fn render_system(p: &mut Painter, lang: Lang, selected: usize, banner: Optio
         p.text_centered(sys.label(), 10, sel, if sel { TEXT } else { DIM }, x, top + 64, tile_w, 14);
         let v = match sys {
             System::Gba => "3,3 V",
-            System::MegaDrive => "Krikzz",
+            System::MegaDrive => "MD Flasher",
             _ => "5 V",
         };
         p.text_centered(v, 9, false, if sel { PRIMARY } else { BORDER }, x, top + 78, tile_w, 12);

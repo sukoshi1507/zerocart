@@ -120,7 +120,7 @@ fn demo_png(args: &[String], out: &str, lang: Lang, fonts: &Fonts) -> Result<(),
             Some("readers") => { screens::render_readers(&mut p, lang, System::Gba, &rows, sel, false, None); true }
             Some("readers-none") => { screens::render_readers(&mut p, lang, System::Gb, &[rows[0].clone_absent(), rows[1].clone_absent()], 0, false, None); true }
             Some("placeholder") => {
-                screens::render_placeholder(&mut p, lang, System::MegaDrive, &["Mega Drive : bientôt dans l'application", "Le lecteur Krikzz répond.", "Utilisez zerocart-md en ligne de commande."]);
+                screens::render_placeholder(&mut p, lang, System::MegaDrive, &["Mega Drive : bientôt dans l'application", "Le MD Flasher répond.", "Utilisez zerocart-md en ligne de commande."]);
                 true
             }
             _ => false,

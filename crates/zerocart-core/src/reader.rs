@@ -31,7 +31,7 @@ impl ReaderKind {
         match self {
             Self::GbxCart => "GBxCart RW / GBFlash",
             Self::Chisflash => "Chisflash",
-            Self::KrikzzMd => "Krikzz Mega Drive",
+            Self::KrikzzMd => "MD Flasher",
         }
     }
 

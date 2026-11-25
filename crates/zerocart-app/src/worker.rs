@@ -250,10 +250,10 @@ impl Worker {
     /// Opens the Krikzz programmer (the handshake refuses any other device) and keeps it for the commands that follow.
     fn md_connect(&self) -> Result<(zerocart_core::krikzz::FlashKit<SerialTransport>, ReaderView), String> {
         let l = self.lang();
-        let port = zerocart_core::krikzz::find_ports().into_iter().next().ok_or_else(|| msg::not_found(l, "Krikzz FlashKit MD"))?;
+        let port = zerocart_core::krikzz::find_ports().into_iter().next().ok_or_else(|| msg::not_found(l, "MD Flasher"))?;
         let t = SerialTransport::open(&port, 9600).map_err(|e| format!("{port} : {e}"))?;
         let kit = zerocart_core::krikzz::FlashKit::connect(t).map_err(|e| msg::md_board_no_answer(l, &e.to_string()))?;
-        Ok((kit, ReaderView { name: "Krikzz FlashKit MD".into(), firmware: String::new(), voltage: "" }))
+        Ok((kit, ReaderView { name: "MD Flasher".into(), firmware: String::new(), voltage: "" }))
     }
 
     /// The commands of the Mega Drive system. Reading only: writing is refused until it is wired with its safeguards.
@@ -261,7 +261,7 @@ impl Worker {
         match cmd {
             Cmd::Detect { .. } => {
                 let r = self.md_detect(md);
-                let _ = tx.send(Event::Detected(r.map(|view| (ReaderView { name: "Krikzz FlashKit MD".into(), firmware: String::new(), voltage: "" }, view))));
+                let _ = tx.send(Event::Detected(r.map(|view| (ReaderView { name: "MD Flasher".into(), firmware: String::new(), voltage: "" }, view))));
             }
             Cmd::ReadRom => {
                 let r = self.md_read_rom(md, tx);
@@ -279,7 +279,7 @@ impl Worker {
                 let r = self.md_flash_rom(md, &path, tx);
                 // the cartridge changed (or the attempt may have): read its header again, then report
                 if let Ok(view) = self.md_detect(md) {
-                    let reader = ReaderView { name: "Krikzz FlashKit MD".into(), firmware: String::new(), voltage: "" };
+                    let reader = ReaderView { name: "MD Flasher".into(), firmware: String::new(), voltage: "" };
                     let _ = tx.send(Event::Detected(Ok((reader, view))));
                 }
                 let _ = tx.send(Event::Finished(r));
@@ -508,10 +508,10 @@ impl Worker {
         let l = self.lang();
         use zerocart_core::ReaderKind;
         if kind == ReaderKind::KrikzzMd {
-            let port = zerocart_core::krikzz::find_ports().into_iter().next().ok_or_else(|| msg::not_found(l, "Krikzz FlashKit MD"))?;
+            let port = zerocart_core::krikzz::find_ports().into_iter().next().ok_or_else(|| msg::not_found(l, "MD Flasher"))?;
             let t = SerialTransport::open(&port, 9600).map_err(|e| format!("{port} : {e}"))?;
             zerocart_core::krikzz::FlashKit::connect(t).map_err(|e| msg::md_board_no_answer(l, &e.to_string()))?;
-            return Ok((None, ReaderView { name: "Krikzz FlashKit MD".into(), firmware: String::new(), voltage: "" }));
+            return Ok((None, ReaderView { name: "MD Flasher".into(), firmware: String::new(), voltage: "" }));
         }
         let mut d = Dev::open_kind(kind, l)?;
         let info = d.r().info(CartMode::Agb);

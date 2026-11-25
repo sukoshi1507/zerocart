@@ -219,7 +219,7 @@ pub fn md_no_save_declared(l: Lang) -> String {
     .into()
 }
 pub fn md_board(l: Lang) -> String {
-    loc!(l, fr: "Carte : Krikzz FlashKit MD", en: "Board: Krikzz FlashKit MD", ja: "ボード：Krikzz FlashKit MD", zh: "开发板：Krikzz FlashKit MD").into()
+    loc!(l, fr: "Carte : MD Flasher", en: "Board: MD Flasher", ja: "ボード：MD Flasher", zh: "开发板：MD Flasher").into()
 }
 pub fn no_flash_answers(l: Lang) -> [String; 2] {
     [

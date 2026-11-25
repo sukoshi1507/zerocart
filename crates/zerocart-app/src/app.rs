@@ -728,7 +728,7 @@ mod tests {
         down(&mut a, Key::Right);
         down(&mut a, Key::Right);
         down(&mut a, Key::Enter);
-        assert_eq!(a.rows().iter().map(|r| r.name.as_str()).collect::<Vec<_>>(), ["Krikzz Mega Drive"]);
+        assert_eq!(a.rows().iter().map(|r| r.name.as_str()).collect::<Vec<_>>(), ["MD Flasher"]);
     }
 
     #[test]
@@ -825,7 +825,7 @@ mod tests {
         a.tick(Instant::now());
         down(&mut a, Key::Enter);
         assert!(matches!(rx.try_recv().unwrap(), Cmd::Connect(ReaderKind::KrikzzMd)));
-        a.on_event(Event::Connected(Ok(ReaderView { name: "Krikzz FlashKit MD".into(), firmware: String::new(), voltage: "" })));
+        a.on_event(Event::Connected(Ok(ReaderView { name: "MD Flasher".into(), firmware: String::new(), voltage: "" })));
         assert_eq!((a.stage, a.system), (Stage::Main, System::MegaDrive));
         assert!(matches!(rx.try_recv().unwrap(), Cmd::Detect { .. }), "the header is read at once");
         a.on_event(Event::Detected(Ok((reader(), None))));
