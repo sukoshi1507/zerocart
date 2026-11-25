@@ -192,12 +192,13 @@ Reste : (5) l'essai réel avec l'application LocalSend (téléphone ou PC) et av
 table de traduction (français et anglais dans `share.rs` et `share_screen.rs`) ; la découverte multicast n'a été vue qu'en
 boucle locale dans les tests.
 
-### Optimisation à valider sur la carte : écriture par tampon (2026-11-26, nuit)
+### Écriture par tampon : validée sur la carte et activée par défaut (2026-11-26, nuit, accord de l'utilisateur pour les essais)
 
-`FlashKit::set_buffered(true)` / `zerocart-md --flash ... --buffered` programme avec le tampon d'écriture de la puce (32 mots :
-déverrouillage, `25` et le nombre de mots, les mots, `29`, attente) au lieu du mot par mot (~24 Kio/s mesurés, limités par le temps
-de programmation de chaque mot). Sur le papier le gain est d'un ordre de grandeur sur une S29GL064N ; **non mesuré et non
-validé sur la cartouche de l'utilisateur**, donc désactivé par défaut (l'application reste en mot par mot). Écrit et testé contre le
-simulateur (puce avec tampon de 64 octets, tampons jamais à cheval sur une frontière, même résultat que le mot par mot).
-À faire avec l'utilisateur : `zerocart-md --flash MEGAPANG-modifie.bin --backup X.bin --buffered --yes` sur sa cartouche (1 Mio),
-comparer la durée et la relecture, puis restaurer ; si tout concorde, l'activer par défaut dans l'application.
+`FlashKit` programme avec le tampon d'écriture de la puce (32 mots : déverrouillage, `25` et le nombre de mots, les mots, `29`,
+attente) quand sa table CFI en annonce un ; `set_buffered(false)` ou `zerocart-md --flash ... --word-by-word` force le mot par mot.
+Mesuré sur la cartouche de l'utilisateur (Spansion S29GL064N) : 1 Mio réécrit (23 secteurs) en **24,6 s au lieu de 42,9 s**, relecture
+vérifiée, ROM d'origine restaurée (même SHA-1). Première version : correcte mais 9 fois plus lente (39 s pour 2 secteurs), car chaque
+commande partait en un appel au port série, qui attend la vidange de sa sortie ; les commandes de plusieurs tampons partent maintenant
+en un seul envoi (le programmeur retient le flux pendant que la puce travaille, grâce à la commande d'attente après chaque tampon).
+Garde-fous : un secteur qui ne se relit pas à l'identique est retenté **mot par mot**, puis refusé ; une puce sans tampon garde le mot
+par mot. Essais par l'écran de l'application (rev7) : lecture, écriture de 2 secteurs et restauration, vérifiés.
