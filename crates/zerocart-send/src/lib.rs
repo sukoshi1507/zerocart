@@ -10,11 +10,15 @@
 //! - [`identity`]: the self-signed certificate of the device; its SHA-256 is the device's LocalSend fingerprint.
 //! - [`http`]: the small part of HTTP/1.1 the protocol needs (requests with a body, responses).
 //! - [`receive`]: the receiving side (register, prepare-upload, upload, cancel) with the user's accept/decline.
+//! - [`discovery`]: the multicast announcements and the list of devices.
+//! - [`service`]: everything together (identity, server, discovery, sending) for the application.
 //! - [`tls`]: the HTTPS server and the client's TLS configuration (self-signed certificates, fingerprints).
 //! - [`send`]: the sending side (register, prepare-upload, upload, cancel).
+pub mod discovery;
 pub mod http;
 pub mod identity;
 pub mod protocol;
 pub mod receive;
 pub mod send;
+pub mod service;
 pub mod tls;
