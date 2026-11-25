@@ -45,6 +45,12 @@ pub enum Event {
     Analysis(Result<Vec<String>, String>),
 }
 
+/// The Krikzz programmer and the header of the cartridge in it.
+struct MdState {
+    kit: zerocart_core::krikzz::FlashKit<SerialTransport>,
+    header: Option<zerocart_core::megadrive::MdHeader>,
+}
+
 /// What the worker knows about the inserted cartridge.
 struct Cart {
     mode: CartMode,
@@ -123,10 +129,37 @@ impl Worker {
         let mut dev: Option<Dev> = None;
         let mut cart: Option<Cart> = None;
         let mut kind: Option<zerocart_core::ReaderKind> = None;
+        // The Krikzz Mega Drive programmer is not a CartReader: it has its own state and commands.
+        let mut md: Option<MdState> = None;
         while let Ok(cmd) = rx.recv() {
             self.cancel.store(false, Ordering::SeqCst);
+            if let Some(state) = md.as_mut() {
+                if matches!(cmd, Cmd::Detect { .. } | Cmd::ReadRom | Cmd::ReadSave | Cmd::Analyze | Cmd::FlashRom(_) | Cmd::WriteSave(_)) {
+                    self.md_command(state, cmd, &tx);
+                    continue;
+                }
+            }
             match cmd {
+                Cmd::Connect(zerocart_core::ReaderKind::KrikzzMd) => {
+                    if let Some(mut d) = dev.take() {
+                        let _ = d.r().close();
+                    }
+                    cart = None;
+                    kind = None;
+                    md = None;
+                    match self.md_connect() {
+                        Ok((kit, view)) => {
+                            md = Some(MdState { kit, header: None });
+                            kind = Some(zerocart_core::ReaderKind::KrikzzMd);
+                            let _ = tx.send(Event::Connected(Ok(view)));
+                        }
+                        Err(e) => {
+                            let _ = tx.send(Event::Connected(Err(e)));
+                        }
+                    }
+                }
                 Cmd::Connect(k) => {
+                    md = None;
                     if let Some(mut d) = dev.take() {
                         let _ = d.r().close();
                     }
@@ -144,6 +177,7 @@ impl Worker {
                     }
                 }
                 Cmd::Disconnect => {
+                    md = None;
                     if let Some(mut d) = dev.take() {
                         let _ = d.r().close();
                     }
@@ -201,6 +235,144 @@ impl Worker {
                 }
             }
         }
+    }
+
+    /// Opens the Krikzz programmer (the handshake refuses any other device) and keeps it for the commands that follow.
+    fn md_connect(&self) -> Result<(zerocart_core::krikzz::FlashKit<SerialTransport>, ReaderView), String> {
+        let port = zerocart_core::krikzz::find_ports().into_iter().next().ok_or("carte Krikzz non trouvée")?;
+        let t = SerialTransport::open(&port, 9600).map_err(|e| format!("{port} : {e}"))?;
+        let kit = zerocart_core::krikzz::FlashKit::connect(t).map_err(|e| format!("la carte ne répond pas : {e}"))?;
+        Ok((kit, ReaderView { name: "Krikzz FlashKit MD".into(), firmware: String::new(), voltage: "" }))
+    }
+
+    /// The commands of the Mega Drive system. Reading only: writing is refused until it is wired with its safeguards.
+    fn md_command(&self, md: &mut MdState, cmd: Cmd, tx: &Sender<Event>) {
+        match cmd {
+            Cmd::Detect { .. } => {
+                let r = self.md_detect(md);
+                let _ = tx.send(Event::Detected(r.map(|view| (ReaderView { name: "Krikzz FlashKit MD".into(), firmware: String::new(), voltage: "" }, view))));
+            }
+            Cmd::ReadRom => {
+                let r = self.md_read_rom(md, tx);
+                let _ = tx.send(Event::Finished(r));
+            }
+            Cmd::ReadSave => {
+                let r = self.md_read_save(md, tx);
+                let _ = tx.send(Event::Finished(r));
+            }
+            Cmd::Analyze => {
+                let r = self.md_analyze(md);
+                let _ = tx.send(Event::Analysis(r));
+            }
+            _ => {
+                let _ = tx.send(Event::Finished(Err("Écriture Mega Drive : bientôt dans l'application (zerocart-md --flash en attendant)".into())));
+            }
+        }
+    }
+
+    /// Reads the "SEGA" header of the inserted cartridge. `None`: no valid Mega Drive header (empty connector, blank
+    /// flash cartridge, another system).
+    fn md_detect(&self, md: &mut MdState) -> Result<Option<CartView>, String> {
+        let header = md.kit.read_header().map_err(|e| e.to_string())?;
+        md.header = header.clone().filter(|h| h.is_valid());
+        Ok(md.header.as_ref().map(|h| {
+            let save = match h.ram {
+                Some(r) => format!("{} Ko{}", r.size() / 1024, if r.odd_bytes { " (octets impairs)" } else { "" }),
+                None => "aucune".into(),
+            };
+            CartView {
+                system: "Mega Drive",
+                title: h.title().to_string(),
+                code: if h.serial.is_empty() { h.system.clone() } else { h.serial.clone() },
+                rom: h.rom_size().map_or("?".into(), size_label),
+                save,
+                database: Some(format!("{} ({})", h.system, h.region)),
+                header_ok: h.is_valid(),
+            }
+        }))
+    }
+
+    fn md_read_rom(&self, md: &mut MdState, tx: &Sender<Event>) -> Result<String, String> {
+        let h = md.header.clone().ok_or("aucune cartouche Mega Drive")?;
+        let size = h.rom_size().ok_or("taille de ROM inconnue (en-tête invalide)")?;
+        std::fs::create_dir_all(&self.out_dir).map_err(|e| e.to_string())?;
+        let title = if h.title().is_empty() { "megadrive".to_string() } else { sanitize(h.title()) };
+        let path = unique_path(&self.out_dir, &title, h.extension());
+        let mut out = std::io::BufWriter::new(std::fs::File::create(&path).map_err(|e| e.to_string())?);
+        let started = Instant::now();
+        let label = format!("Lecture ROM : {}", h.title());
+        let dump = md.kit.dump_rom(size, &mut out, &mut |done| {
+            let kib_s = done as f32 / 1024.0 / started.elapsed().as_secs_f32().max(0.001);
+            let _ = tx.send(Event::Progress { label: label.clone(), done: done as u64, total: size as u64, kib_s });
+            !self.cancel.load(Ordering::SeqCst)
+        });
+        let dump = match dump {
+            Ok(d) => d,
+            Err(e) => {
+                drop(out);
+                let _ = std::fs::remove_file(&path);
+                return Err(if matches!(e, zerocart_core::Error::Cancelled) { "annulé".into() } else { e.to_string() });
+            }
+        };
+        out.flush().map_err(|e| e.to_string())?;
+        let file = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+        Ok(if dump.checksum16 == h.checksum {
+            format!("ROM lue, checksum de l'en-tête OK (CRC32 {:08x}) : {file}", dump.crc32)
+        } else {
+            // Homebrew and some repros carry a wrong checksum in their header: the CRC32 is the real proof.
+            format!("!ROM lue, mais le checksum de l'en-tête diffère (fréquent sur les ROM amateur) : {file}, CRC32 {:08x}", dump.crc32)
+        })
+    }
+
+    fn md_read_save(&self, md: &mut MdState, tx: &Sender<Event>) -> Result<String, String> {
+        let h = md.header.clone().ok_or("aucune cartouche Mega Drive")?;
+        let ram = h.ram.ok_or("l'en-tête ne déclare aucune sauvegarde")?;
+        let _ = tx.send(Event::Progress { label: "Lecture de la sauvegarde".into(), done: 0, total: ram.size() as u64, kib_s: 0.0 });
+        let stream = md.kit.read_save_stream(ram.size()).map_err(|e| e.to_string())?;
+        std::fs::create_dir_all(&self.out_dir).map_err(|e| e.to_string())?;
+        let title = if h.title().is_empty() { "megadrive".to_string() } else { sanitize(h.title()) };
+        // The file keeps the bus's word stream (data on the odd bytes), as the reference client saves it.
+        let path = unique_path(&self.out_dir, &format!("{title} (non vérifiée)"), "sav");
+        std::fs::write(&path, &stream).map_err(|e| e.to_string())?;
+        let file = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+        Ok(format!("!Attention : sauvegarde NON vérifiée, ce lecteur ne coupe pas l'alimentation (pile morte invisible) : {file}"))
+    }
+
+    /// Read-only identification of the flash chip (CFI query, identifiers, sectors).
+    fn md_analyze(&self, md: &mut MdState) -> Result<Vec<String>, String> {
+        let mut lines = vec!["Carte : Krikzz FlashKit MD".to_string()];
+        match md.kit.probe_flash().map_err(|e| e.to_string())? {
+            None => {
+                lines.push("Aucune puce flash ne répond :".into());
+                lines.push("ROM masquée, non réinscriptible.".into());
+            }
+            Some(f) => {
+                lines.push(format!("CFI : {}", if f.cfi_ok { "répond" } else { "ne répond pas" }));
+                if f.size_bytes > 0 {
+                    lines.push(format!("Puce : {} Mo", f.size_bytes / (1 << 20)));
+                }
+                lines.push(format!(
+                    "Fabricant 0x{:04X}, puce {}",
+                    f.manufacturer,
+                    f.device_id.iter().map(|d| format!("{d:04X}")).collect::<Vec<_>>().join("/")
+                ));
+                if f.byte_wide {
+                    lines.push("Deux puces 8 bits (cartouche de copie)".into());
+                }
+                if let Some(g) = md.kit.read_geometry().map_err(|e| e.to_string())? {
+                    let mut runs: Vec<(u32, u32)> = Vec::new();
+                    for &(_, size) in &g.sectors {
+                        match runs.last_mut() {
+                            Some(r) if r.0 == size => r.1 += 1,
+                            _ => runs.push((size, 1)),
+                        }
+                    }
+                    let desc: Vec<String> = runs.iter().map(|(sz, n)| format!("{n} × {} Ko", sz / 1024)).collect();
+                    lines.push(format!("Secteurs : {}", desc.join(" + ")));
+                }
+            }
+        }
+        Ok(lines)
     }
 
     /// Opens the reader of `kind` and asks it who it is. The Krikzz programmer is only handshaken (nothing is read

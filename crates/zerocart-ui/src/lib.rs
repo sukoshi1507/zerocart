@@ -283,7 +283,7 @@ fn info(p: &mut Painter, v: &View) {
         (if fr { "Code" } else { "Code" }, c.code.clone()),
         ("ROM", c.rom.clone()),
         (if fr { "Sauvegarde" } else { "Save" }, c.save.clone()),
-        (if fr { "Base" } else { "Database" }, c.database.clone().unwrap_or_else(|| (if fr { "jeu inconnu" } else { "unknown game" }).into())),
+        (if fr { "Infos" } else { "Info" }, c.database.clone().unwrap_or_else(|| (if fr { "jeu inconnu" } else { "unknown game" }).into())),
         (if fr { "En-tête" } else { "Header" }, (if c.header_ok { "OK" } else if fr { "invalide" } else { "invalid" }).into()),
     ];
     for (i, (k, val)) in rows.iter().enumerate() {

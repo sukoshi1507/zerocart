@@ -29,8 +29,6 @@ pub enum Stage {
     Readers,
     /// Cartridge / Actions / Tools
     Main,
-    /// A system whose support is planned but not implemented
-    Placeholder,
 }
 
 const SPLASH_TIME: Duration = Duration::from_millis(1600);
@@ -176,7 +174,7 @@ impl App {
     /// Back one level: tabs -> readers -> systems -> quit.
     fn back(&mut self) {
         match self.stage {
-            Stage::Main | Stage::Placeholder => {
+            Stage::Main => {
                 let _ = self.tx.send(Cmd::Disconnect);
                 self.reader = None;
                 self.cart = None;
@@ -211,7 +209,7 @@ impl App {
                 self.reader_moved = false;
                 self.banner = None;
             }
-            (Stage::System, Key::Esc) | (Stage::Readers, Key::Esc) | (Stage::Placeholder, Key::Esc) => self.back(),
+            (Stage::System, Key::Esc) | (Stage::Readers, Key::Esc) => self.back(),
             (Stage::Readers, Key::Up) | (Stage::Readers, Key::Down) if !self.connecting => {
                 let n = self.reader_kinds().len().max(1);
                 self.reader_moved = true;
@@ -314,6 +312,13 @@ impl App {
             return;
         };
         self.banner = None;
+        if action.writes() && self.system == System::MegaDrive {
+            self.banner = Some((
+                (if fr { "Écriture Mega Drive : bientôt dans l'application" } else { "Mega Drive writing: coming soon" }).into(),
+                true,
+            ));
+            return;
+        }
         if action.writes() {
             let gba = cart.system == "GBA";
             let (exts, what): (&[&str], &str) = match action {
@@ -387,6 +392,8 @@ impl App {
                     let fr = self.fr();
                     self.banner = Some((
                         match (self.dmg(), fr) {
+                            _ if self.system == System::MegaDrive && fr => "Pas de cartouche Mega Drive reconnue (en-tête SEGA absent)",
+                            _ if self.system == System::MegaDrive => "No Mega Drive cartridge recognised (no SEGA header)",
                             (false, true) => "Pas de cartouche GBA : est-ce une Game Boy ? (Échap : changer)",
                             (false, false) => "No GBA cartridge: is it a Game Boy one? (Esc: change)",
                             (true, true) => "Pas de cartouche Game Boy : est-ce une GBA ? (Échap : changer)",
@@ -402,11 +409,7 @@ impl App {
             Event::Connected(Ok(view)) => {
                 self.connecting = false;
                 self.reader = Some(view);
-                if self.system == System::MegaDrive {
-                    self.stage = Stage::Placeholder;
-                } else {
-                    self.enter_main(self.system);
-                }
+                self.enter_main(self.system);
             }
             Event::Connected(Err(msg)) => {
                 self.connecting = false;
@@ -448,15 +451,6 @@ impl App {
             Stage::System => screens::render_system(p, self.lang, self.system_sel, banner),
             Stage::Readers => screens::render_readers(p, self.lang, self.system, &self.rows(), self.reader_sel, self.connecting, banner),
             Stage::Main => zerocart_ui::render(p, &self.view()),
-            Stage::Placeholder => {
-                let fr = self.fr();
-                let lines: [&str; 3] = if fr {
-                    ["Mega Drive : bientôt dans l'application", "Le lecteur Krikzz répond.", "Utilisez zerocart-md en ligne de commande."]
-                } else {
-                    ["Mega Drive: coming soon in the app", "The Krikzz reader answers.", "Use zerocart-md on the command line."]
-                };
-                screens::render_placeholder(p, self.lang, self.system, &lines);
-            }
         }
     }
 
@@ -729,7 +723,7 @@ mod tests {
     }
 
     #[test]
-    fn the_mega_drive_reaches_a_placeholder_after_the_handshake() {
+    fn the_mega_drive_reads_its_cartridge_but_refuses_writing_for_now() {
         let (mut a, rx) = fresh(vec![plugged(ReaderKind::KrikzzMd)]);
         down(&mut a, Key::Enter);
         for _ in 0..3 {
@@ -740,11 +734,24 @@ mod tests {
         down(&mut a, Key::Enter);
         assert!(matches!(rx.try_recv().unwrap(), Cmd::Connect(ReaderKind::KrikzzMd)));
         a.on_event(Event::Connected(Ok(ReaderView { name: "Krikzz FlashKit MD".into(), firmware: String::new(), voltage: "" })));
-        assert_eq!(a.stage, Stage::Placeholder);
-        assert!(rx.try_recv().is_err(), "no cartridge is read for a system that is not implemented");
+        assert_eq!((a.stage, a.system), (Stage::Main, System::MegaDrive));
+        assert!(matches!(rx.try_recv().unwrap(), Cmd::Detect { .. }), "the header is read at once");
+        a.on_event(Event::Detected(Ok((reader(), None))));
+        assert_eq!(a.banner, Some(("Pas de cartouche Mega Drive reconnue (en-tête SEGA absent)".into(), true)));
+        a.on_event(Event::Detected(Ok((reader(), Some(CartView { system: "Mega Drive", ..cart() })))));
+        // reading is offered, writing is refused before anything is asked
+        down(&mut a, Key::Right);
+        down(&mut a, Key::Enter);
+        assert!(matches!(rx.try_recv().unwrap(), Cmd::ReadRom));
+        a.on_event(Event::Finished(Ok("ROM lue".into())));
+        a.action_sel = 3; // flash a ROM
+        down(&mut a, Key::Enter);
+        assert!(rx.try_recv().is_err(), "nothing is sent for a write");
+        assert_eq!(a.banner, Some(("Écriture Mega Drive : bientôt dans l'application".into(), true)));
+        down(&mut a, Key::Esc);
         down(&mut a, Key::Esc);
         assert!(matches!(rx.try_recv().unwrap(), Cmd::Disconnect));
-        assert_eq!(a.stage, Stage::Readers);
+        assert_eq!(a.stage, Stage::System);
     }
 
     #[test]
