@@ -480,7 +480,10 @@ impl<T: Transport> FlashKit<T> {
                         }
                         return Err(invalid("a sector did not erase"));
                     }
-                    self.program(off, &want)?;
+                    // an erased sector already holds 0xFF: programming it would only waste time
+                    if want.iter().any(|&b| b != 0xFF) {
+                        self.program(off, &want)?;
+                    }
                     if self.read(off, size as usize)? == want {
                         break;
                     }
@@ -1012,6 +1015,20 @@ mod tests {
         assert_eq!(s.rom[0x30000..], game()[0x30000..], "sectors beyond the image are not touched");
         assert_eq!(s.chip, Chip::Array);
         assert_eq!(steps.last().unwrap(), &("done".to_string(), 3, 3));
+    }
+
+    #[test]
+    fn a_sector_whose_target_is_all_ff_is_erased_but_not_programmed() {
+        let mut k = flash_kit();
+        let g = k.read_geometry().unwrap().unwrap();
+        let mut image = game();
+        image[0x20000..0x30000].fill(0xFF); // sector 2 must become blank
+        k.flash_rom(&g, &image, &mut |_, _, _| {}, &|| false).unwrap();
+        let s = k.into_inner();
+        assert_eq!(s.erased, vec![0x20000]);
+        assert!(s.rom[0x20000..0x30000].iter().all(|&b| b == 0xFF));
+        // a program command is "A0" in bypass mode: it was sent for no sector
+        assert!(!s.writes.iter().any(|&(_, v)| v == 0xA0), "no programming for a blank target");
     }
 
     #[test]
