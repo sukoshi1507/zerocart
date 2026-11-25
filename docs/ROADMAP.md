@@ -202,3 +202,16 @@ commande partait en un appel au port série, qui attend la vidange de sa sortie 
 en un seul envoi (le programmeur retient le flux pendant que la puce travaille, grâce à la commande d'attente après chaque tampon).
 Garde-fous : un secteur qui ne se relit pas à l'identique est retenté **mot par mot**, puis refusé ; une puce sans tampon garde le mot
 par mot. Essais par l'écran de l'application (rev7) : lecture, écriture de 2 secteurs et restauration, vérifiés.
+
+### ZeroSend : essais réels sur le réseau (2026-11-26, nuit, accord de l'utilisateur pour les essais matériels)
+
+Outil `zerocart-share` (crate zerocart-send) : `--list`, `--send`, `--text`, `--serve`. Essais entre le PC (x86) et l'appareil (arm64) sur le
+Wi-Fi de l'utilisateur, sans l'application LocalSend :
+- envoi PC vers appareil : 3 Mo en 6 à 7 s, SHA-256 identique ; message texte délivré ; envoi appareil vers PC : 1,5 Mo en 7 s, identique.
+  Le TLS avec certificat client et vérification de l'empreinte fonctionne entre les deux architectures.
+- Découverte : le multicast seul est capricieux (le Wi-Fi de l'appareil est en économie d'énergie : `Power save: on`) ; il a trouvé l'appareil une
+  fois sur plusieurs essais. Ajout d'un **balayage du sous-réseau** (comme la découverte HTTP de LocalSend) : sonde chaque adresse du /24 sur le
+  port 53317 (connexion rapide puis `register`) ; avec lui, la découverte par le nom est fiable (5 s). Il est lancé au démarrage et à chaque
+  « relire » (R). Pas encore essayé avec l'application LocalSend elle-même (téléphone), à faire avec l'utilisateur.
+- Les noms d'hôte ne se résolvent pas dans un binaire statique sans les bibliothèques de la machine (avertissement de l'éditeur de liens) :
+  utiliser une adresse IP pour « ajouter par adresse ».

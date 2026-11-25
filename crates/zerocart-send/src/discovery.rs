@@ -7,7 +7,7 @@ use crate::send::{register, Peer};
 use socket2::{Domain, Protocol, Socket, Type};
 use std::collections::HashMap;
 use std::io;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream, UdpSocket};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -77,15 +77,89 @@ pub fn parse_ip_addresses(json: &str) -> Vec<(String, Ipv4Addr)> {
     out
 }
 
+/// `[(IPv4, prefix length)]` of the same interfaces (the size of the network, for the scan).
+pub fn parse_ip_networks(json: &str) -> Vec<(String, Ipv4Addr, u8)> {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(json) else { return vec![] };
+    let mut out = Vec::new();
+    for link in v.as_array().into_iter().flatten() {
+        let name = link["ifname"].as_str().unwrap_or("").to_string();
+        for a in link["addr_info"].as_array().into_iter().flatten() {
+            if a["family"] == "inet" {
+                if let (Some(ip), Some(prefix)) = (a["local"].as_str().and_then(|s| s.parse::<Ipv4Addr>().ok()), a["prefixlen"].as_u64()) {
+                    if !ip.is_loopback() {
+                        out.push((name.clone(), ip, prefix.min(32) as u8));
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+fn ip_json() -> String {
+    let out = std::process::Command::new("ip").args(["-j", "-4", "addr", "show", "up"]).output();
+    out.ok().map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default()
+}
+
+fn is_lan_link(name: &str) -> bool {
+    !["tailscale", "tun", "wg", "docker", "veth"].iter().any(|p| name.starts_with(p))
+}
+
 /// The addresses multicast can work on: no VPN or container links.
 pub fn lan_addresses() -> Vec<Ipv4Addr> {
-    let out = std::process::Command::new("ip").args(["-j", "-4", "addr", "show", "up"]).output();
-    let text = out.ok().map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default();
-    parse_ip_addresses(&text)
-        .into_iter()
-        .filter(|(name, _)| !["tailscale", "tun", "wg", "docker", "veth"].iter().any(|p| name.starts_with(p)))
-        .map(|(_, ip)| ip)
-        .collect()
+    parse_ip_addresses(&ip_json()).into_iter().filter(|(name, _)| is_lan_link(name)).map(|(_, ip)| ip).collect()
+}
+
+/// The other hosts to probe on the network of `ip`/`prefix`: its /24 at most (a bigger network is not walked), never
+/// the address itself, the network address or the broadcast address.
+pub fn scan_candidates(ip: Ipv4Addr, prefix: u8) -> Vec<Ipv4Addr> {
+    let prefix = prefix.clamp(24, 30); // /24 at most: 254 hosts; a /31 or /32 has nobody to look for
+    let mask = u32::MAX << (32 - prefix);
+    let (base, own) = (u32::from(ip) & mask, u32::from(ip));
+    let size = 1u32 << (32 - prefix);
+    (1..size - 1).map(|i| base + i).filter(|a| *a != own).map(Ipv4Addr::from).collect()
+}
+
+/// Probes `hosts` for a LocalSend device: a quick TCP connect on `port`, then `register` (which also introduces this
+/// device to it). Many probes run at once; each answer found is added to `peers`. This finds devices that do not hear
+/// or send multicast (Wi-Fi power saving, some access points), the way LocalSend's own HTTP discovery does.
+pub fn scan_hosts(hosts: Vec<IpAddr>, port: u16, me: &DeviceInfo, id: &Identity, peers: &Peers, on_change: &(dyn Fn() + Sync)) {
+    let queue = Mutex::new(hosts);
+    let workers = 16usize;
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            scope.spawn(|| loop {
+                let Some(ip) = queue.lock().unwrap().pop() else { return };
+                if TcpStream::connect_timeout(&SocketAddr::new(ip, port), Duration::from_millis(300)).is_err() {
+                    continue;
+                }
+                for protocol in ["https", "http"] {
+                    let mut info = me.clone();
+                    info.port = Some(port);
+                    info.protocol = Some(protocol.to_string());
+                    let probe = Peer { info, ip, verify: false };
+                    if let Ok(theirs) = register(id, me, &probe) {
+                        peers.add(DeviceInfo { port: Some(port), protocol: Some(protocol.to_string()), ..theirs }, ip, false);
+                        on_change();
+                        break;
+                    }
+                }
+            });
+        }
+    });
+}
+
+/// The scan of every network this device is on.
+pub fn scan_lan(me: &DeviceInfo, id: &Identity, peers: &Peers, on_change: &(dyn Fn() + Sync)) {
+    let mut hosts: Vec<IpAddr> = Vec::new();
+    for (name, ip, prefix) in parse_ip_networks(&ip_json()) {
+        if is_lan_link(&name) {
+            hosts.extend(scan_candidates(ip, prefix).into_iter().map(IpAddr::from));
+        }
+    }
+    hosts.sort();
+    hosts.dedup();
+    scan_hosts(hosts, me.port.unwrap_or(PORT), me, id, peers, on_change);
 }
 
 /// An announcement (`announce` true) or an answer (false), with the port and protocol.
@@ -110,6 +184,11 @@ pub struct Discovery {
     thread: Option<JoinHandle<()>>,
     socket: Arc<UdpSocket>,
     me: DeviceInfo,
+    id: Arc<Identity>,
+    peers: Arc<Peers>,
+    on_change: Arc<dyn Fn() + Send + Sync>,
+    /// A scan is running (two at once would only repeat each other).
+    scanning: Arc<AtomicBool>,
 }
 
 fn send_all(socket: &UdpSocket, me: &DeviceInfo, announce: bool) {
@@ -139,6 +218,7 @@ impl Discovery {
         let socket = Arc::new(socket);
         let stop = Arc::new(AtomicBool::new(false));
         let (flag, sock, me2) = (stop.clone(), socket.clone(), me.clone());
+        let (id_keep, peers_keep, change_keep) = (id.clone(), peers.clone(), on_change.clone());
         let thread = std::thread::spawn(move || {
             let mut buf = vec![0u8; 65535];
             while !flag.load(Ordering::SeqCst) {
@@ -158,10 +238,11 @@ impl Discovery {
                 });
             }
         });
-        Ok(Self { stop, thread: Some(thread), socket, me })
+        Ok(Self { stop, thread: Some(thread), socket, me, id: id_keep, peers: peers_keep, on_change: change_keep, scanning: Arc::new(AtomicBool::new(false)) })
     }
 
-    /// Announces this device a few times, in case one datagram is lost.
+    /// Announces this device a few times, in case one datagram is lost, and looks for the devices that did not hear it
+    /// by probing the network (see [`scan_hosts`]).
     pub fn announce(&self) {
         let (sock, me) = (self.socket.clone(), self.me.clone());
         std::thread::spawn(move || {
@@ -170,6 +251,15 @@ impl Discovery {
                 send_all(&sock, &me, true);
             }
         });
+        if !self.scanning.swap(true, Ordering::SeqCst) {
+            let (me, id, peers, on_change, scanning, stop) = (self.me.clone(), self.id.clone(), self.peers.clone(), self.on_change.clone(), self.scanning.clone(), self.stop.clone());
+            std::thread::spawn(move || {
+                if !stop.load(Ordering::SeqCst) {
+                    scan_lan(&me, &id, &peers, &*on_change);
+                }
+                scanning.store(false, Ordering::SeqCst);
+            });
+        }
     }
 
     pub fn stop(mut self) {
@@ -265,6 +355,27 @@ mod tests {
         assert!(handle_datagram(b"not json", ip, &peers).is_none());
         assert!(handle_datagram(b"", ip, &peers).is_none());
         assert_eq!(peers.list().len(), 2);
+    }
+
+    #[test]
+    fn the_hosts_to_probe_are_the_24_around_this_address_without_itself() {
+        let h = scan_candidates("192.168.1.10".parse().unwrap(), 24);
+        assert_eq!(h.len(), 253, "254 hosts minus this one");
+        assert!(!h.contains(&"192.168.1.10".parse().unwrap()) && !h.contains(&"192.168.1.0".parse().unwrap()) && !h.contains(&"192.168.1.255".parse().unwrap()));
+        assert_eq!((h.first(), h.last()), (Some(&"192.168.1.1".parse().unwrap()), Some(&"192.168.1.254".parse().unwrap())));
+        // a big network is not walked: only the /24 of the address
+        assert_eq!(scan_candidates("10.1.2.3".parse().unwrap(), 8).len(), 253);
+        // a small one is walked whole
+        let small = scan_candidates("192.168.1.130".parse().unwrap(), 26);
+        assert_eq!(small.len(), 61);
+        assert!(small.iter().all(|a| u32::from(*a) >> 6 == u32::from(Ipv4Addr::new(192, 168, 1, 130)) >> 6));
+        assert!(scan_candidates("192.168.1.5".parse().unwrap(), 32).len() <= 253);
+    }
+
+    #[test]
+    fn prefix_lengths_are_read_from_ip_json() {
+        let json = r#"[{"ifname":"wlan0","addr_info":[{"family":"inet","local":"192.168.1.10","prefixlen":24}]},{"ifname":"lo","addr_info":[{"family":"inet","local":"127.0.0.1","prefixlen":8}]}]"#;
+        assert_eq!(parse_ip_networks(json), vec![("wlan0".to_string(), "192.168.1.10".parse().unwrap(), 24)]);
     }
 
     #[test]

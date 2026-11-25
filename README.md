@@ -84,7 +84,8 @@ saves (`.sav`) you want to write in `~/zerocart`; dumps are written there too.
   (GBFlash; a dry run unless `--yes`).
 - `zerocart-chis --info | --gba-header | --gba-dump FILE | --gb-header | --gb-dump FILE` (Chisflash, read only).
 - `zerocart-chis-flash --flash-rom --rom FILE --backup BACKUP.gb [--yes]` (Chisflash, Game Boy MBC5).
-- `zerocart-md --info | --header | --dump FILE | --save FILE | --identify | --flash FILE --backup OUT [--yes]`
+- `zerocart-md --info | --header | --dump FILE | --save FILE | --identify | --flash FILE --backup OUT [--yes] [--word-by-word]`
+- `zerocart-share --list | --send TARGET FILE... | --text TARGET MESSAGE | --serve [--accept-all]` : ZeroSend (LocalSend) without the screen, to script it or test it (`--accept-all` skips the question: only on a network you trust)
   (MD Flasher; `--flash` is a dry run unless `--yes`).
 
 ## Build

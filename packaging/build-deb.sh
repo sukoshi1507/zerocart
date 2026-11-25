@@ -31,9 +31,9 @@ OFFLINE_FLAG=""
 
 echo "== building zerocart $VERSION for aarch64"
 (cd "$ROOT" && "$CARGO" build --release $OFFLINE_FLAG --target aarch64-unknown-linux-gnu \
-    -p zerocart-app -p zerocart-core -p zerocart-flashchips)
+    -p zerocart-app -p zerocart-core -p zerocart-flashchips -p zerocart-send)
 BINDIR="$ROOT/target/aarch64-unknown-linux-gnu/release"
-for b in zerocart-app zerocart zerocart-flash zerocart-chis zerocart-chis-flash zerocart-md; do
+for b in zerocart-app zerocart zerocart-flash zerocart-chis zerocart-chis-flash zerocart-md zerocart-share; do
     [ -x "$BINDIR/$b" ] || { echo "missing $BINDIR/$b" >&2; exit 1; }
 done
 
@@ -41,7 +41,7 @@ echo "== staging $STAGE"
 rm -rf "$STAGE"
 install -d -m 755 "$STAGE/DEBIAN" "$STAGE/usr/bin" "$STAGE/usr/share/zerocart/configs" \
     "$STAGE/usr/share/APPLaunch/applications" "$STAGE/usr/share/APPLaunch/share/images" "$STAGE/usr/share/doc/zerocart"
-for b in zerocart-app zerocart zerocart-flash zerocart-chis zerocart-chis-flash zerocart-md; do
+for b in zerocart-app zerocart zerocart-flash zerocart-chis zerocart-chis-flash zerocart-md zerocart-share; do
     install -m 755 "$BINDIR/$b" "$STAGE/usr/bin/$b"
 done
 for f in "$ROOT"/configs/db_*.json "$ROOT"/configs/fc_*.txt; do

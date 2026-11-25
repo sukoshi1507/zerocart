@@ -189,6 +189,35 @@ mod tests {
     }
 
     #[test]
+    fn a_scan_finds_a_device_that_multicast_did_not_show() {
+        let (a, dir_a, _) = start("scan-a");
+        let (b, dir_b, _) = start("scan-b");
+        // A probes a few hosts of the loopback range, among them B's address and port
+        let peers = Arc::new(crate::discovery::Peers::new(a.fingerprint()));
+        let id = Identity::load_or_create(&dir_a.join("state")).unwrap();
+        let me = DeviceInfo { port: Some(b.port()), ..DeviceInfo::this_device("Scanner", &id.fingerprint, true) };
+        let found = AtomicUsize::new(0);
+        crate::discovery::scan_hosts(
+            vec!["127.0.0.2".parse().unwrap(), "127.0.0.1".parse().unwrap(), "127.0.0.3".parse().unwrap()],
+            b.port(),
+            &me,
+            &id,
+            &peers,
+            &|| {
+                found.fetch_add(1, Ordering::SeqCst);
+            },
+        );
+        let list = peers.list();
+        assert!(list.iter().any(|p| p.info.fingerprint == b.fingerprint()), "B was found by probing: {list:?}");
+        assert!(found.load(Ordering::SeqCst) >= 1);
+        assert!(list.iter().all(|p| p.verify), "a device found by the scan is checked against its fingerprint later");
+        a.stop();
+        b.stop();
+        let _ = std::fs::remove_dir_all(dir_a);
+        let _ = std::fs::remove_dir_all(dir_b);
+    }
+
+    #[test]
     fn the_identity_survives_a_restart_and_a_bad_address_is_explained() {
         let (a, dir, _) = start("c");
         let fp = a.fingerprint().to_string();
