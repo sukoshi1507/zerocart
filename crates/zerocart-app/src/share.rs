@@ -16,15 +16,65 @@ use zerocart_send::send::{Cancel, Outcome, Outgoing, Peer, SendEvent};
 use zerocart_send::service::{Config, Service};
 use zerocart_ui::share_screen::{render_share, ShareBody, ShareRow};
 use zerocart_ui::widgets::Painter;
-use zerocart_ui::{Lang, ProgressView};
+use zerocart_ui::{loc, Lang, ProgressView};
 
 /// How long a request from another device waits for the user (then it is declined).
 const ASK_TIMEOUT: Duration = Duration::from_secs(300);
 /// Extensions of what can be sent: dumps, saves.
 const SENDABLE: &[&str] = &["bin", "md", "gen", "gba", "gb", "gbc", "sav", "srm"];
 
-fn txt(lang: Lang, fr: &'static str, en: &'static str) -> &'static str {
-    if lang == Lang::Fr { fr } else { en }
+/// The errors of zerocart-send are written in French (it does not know the interface language): the ones a user can
+/// meet are recognised here and shown in the current language, the others are shown as they are.
+fn localize_error(l: Lang, e: String) -> String {
+    let rest = |prefix: &str| e.strip_prefix(prefix).map(str::to_string);
+    if e == "annulé" {
+        return loc!(l, fr: e, en: "cancelled".into(), ja: "中止しました".into(), zh: "已取消".into());
+    }
+    if e == "rien à envoyer" {
+        return loc!(l, fr: e, en: "nothing to send".into(), ja: "送信するものがありません".into(), zh: "没有可发送的内容".into());
+    }
+    if e == "pas de réponse de l'appareil" {
+        return loc!(l, fr: e, en: "no answer from the device".into(), ja: "機器から応答がありません".into(), zh: "设备没有响应".into());
+    }
+    if e == "connexion refusée : LocalSend est-il ouvert ?" {
+        return loc!(l, fr: e, en: "connection refused: is LocalSend open?".into(), ja: "接続が拒否されました：LocalSendは開いていますか？".into(), zh: "连接被拒绝：LocalSend是否已打开？".into());
+    }
+    if e == "le certificat ne correspond pas à l'empreinte de l'appareil" {
+        return loc!(l,
+            fr: e,
+            en: "the certificate does not match the device's fingerprint".into(),
+            ja: "証明書が機器のフィンガープリントと一致しません".into(),
+            zh: "证书与设备指纹不一致".into());
+    }
+    if e == "réponse vide" {
+        return loc!(l, fr: e, en: "empty answer".into(), ja: "応答が空です".into(), zh: "响应为空".into());
+    }
+    if e == "le fichier est plus court que prévu" {
+        return loc!(l, fr: e, en: "the file is shorter than expected".into(), ja: "ファイルが想定より短いです".into(), zh: "文件比预期短".into());
+    }
+    if let Some(x) = rest("adresse invalide : ") {
+        return loc!(l, fr: e, en: format!("invalid address: {x}"), ja: format!("無効なアドレス：{x}"), zh: format!("地址无效：{x}"));
+    }
+    if let Some(x) = rest("adresse introuvable : ") {
+        return loc!(l, fr: e, en: format!("address not found: {x}"), ja: format!("アドレスが見つかりません：{x}"), zh: format!("找不到地址：{x}"));
+    }
+    if let Some(x) = rest("réponse invalide : ") {
+        return loc!(l, fr: e, en: format!("invalid answer: {x}"), ja: format!("応答が不正です：{x}"), zh: format!("响应无效：{x}"));
+    }
+    if let Some(x) = e.strip_suffix(" ne répond pas (LocalSend est-il ouvert ?)") {
+        return loc!(l,
+            fr: e.clone(),
+            en: format!("{x} does not answer (is LocalSend open?)"),
+            ja: format!("{x} が応答しません（LocalSendは開いていますか？）"),
+            zh: format!("{x} 没有响应（LocalSend是否已打开？）"));
+    }
+    if let Some(x) = e.strip_prefix("refusé (HTTP ").and_then(|r| r.strip_suffix(')')) {
+        return loc!(l, fr: e.clone(), en: format!("refused (HTTP {x})"), ja: format!("拒否されました（HTTP {x}）"), zh: format!("被拒绝（HTTP {x}）"));
+    }
+    if let Some((name, x)) = e.split_once(" : refusé (HTTP ").and_then(|(n, r)| Some((n, r.strip_suffix(')')?))) {
+        return loc!(l, fr: e.clone(), en: format!("{name}: refused (HTTP {x})"), ja: format!("{name}：拒否されました（HTTP {x}）"), zh: format!("{name}：被拒绝（HTTP {x}）"));
+    }
+    e
 }
 
 /// What the screen needs from ZeroSend: the real one is a [`Service`], tests use a fake.
@@ -147,8 +197,9 @@ pub struct Share {
     lang: Lang,
 }
 
-fn size_text(bytes: u64) -> String {
-    if bytes >= 1 << 20 { format!("{:.1} Mo", bytes as f64 / (1 << 20) as f64) } else { format!("{} Ko", bytes.div_ceil(1024)) }
+fn size_text(l: Lang, bytes: u64) -> String {
+    let (ko, mo) = (crate::msg::ko(l), loc!(l, fr: "Mo", en: "MiB", ja: "MiB", zh: "MiB"));
+    if bytes >= 1 << 20 { format!("{:.1} {mo}", bytes as f64 / (1 << 20) as f64) } else { format!("{} {ko}", bytes.div_ceil(1024)) }
 }
 
 /// What can be sent: the dumps and saves of `dir` and of `dir/backups`.
@@ -168,9 +219,9 @@ fn sendable_files(dir: &Path) -> Vec<PathBuf> {
     v
 }
 
-fn file_label(dir: &Path, p: &Path) -> String {
+fn file_label(l: Lang, dir: &Path, p: &Path) -> String {
     let rel = p.strip_prefix(dir).unwrap_or(p).to_string_lossy().into_owned();
-    format!("{rel}  ({})", size_text(std::fs::metadata(p).map(|m| m.len()).unwrap_or(0)))
+    format!("{rel}  ({})", size_text(l, std::fs::metadata(p).map(|m| m.len()).unwrap_or(0)))
 }
 
 impl Share {
@@ -211,26 +262,31 @@ impl Share {
                     let _ = answer.send(false); // one request at a time
                     return;
                 }
-                let mut lines = vec![if l == Lang::Fr { format!("{from} veut vous envoyer :") } else { format!("{from} wants to send you:") }];
+                let mut lines = vec![loc!(l,
+                    fr: format!("{from} veut vous envoyer :"),
+                    en: format!("{from} wants to send you:"),
+                    ja: format!("{from} が送信しようとしています："),
+                    zh: format!("{from} 想要发送给您："))];
                 for (name, size) in files.iter().take(3) {
-                    lines.push(format!("{name} ({})", size_text(*size)));
+                    lines.push(format!("{name} ({})", size_text(l, *size)));
                 }
                 if files.len() > 3 {
-                    lines.push(if l == Lang::Fr { format!("... et {} autres", files.len() - 3) } else { format!("... and {} more", files.len() - 3) });
+                    let more = files.len() - 3;
+                    lines.push(loc!(l, fr: format!("... et {more} autres"), en: format!("... and {more} more"), ja: format!("...ほか{more}件"), zh: format!("...另有{more}个")));
                 }
-                lines.push(txt(l, "Enregistré dans ~/Downloads.", "Saved in ~/Downloads.").to_string());
+                lines.push(loc!(l, fr: "Enregistré dans ~/Downloads.", en: "Saved in ~/Downloads.", ja: "~/Downloads に保存されます。", zh: "将保存到 ~/Downloads。").to_string());
                 self.incoming = Some(Incoming { lines, answer });
             }
             ShareEvent::Message { from, text } => {
-                self.banner = Some((if l == Lang::Fr { format!("Message de {from} : {text}") } else { format!("Message from {from}: {text}") }, false));
+                self.banner = Some((loc!(l, fr: format!("Message de {from} : {text}"), en: format!("Message from {from}: {text}"), ja: format!("{from} からのメッセージ：{text}"), zh: format!("来自 {from} 的消息：{text}")), false));
             }
             ShareEvent::Receiving { file, done, total } => {
-                self.receiving = Some(ProgressView { label: if l == Lang::Fr { format!("Réception : {file}") } else { format!("Receiving: {file}") }, done, total, kib_s: 0.0 });
+                self.receiving = Some(ProgressView { label: loc!(l, fr: format!("Réception : {file}"), en: format!("Receiving: {file}"), ja: format!("受信中：{file}"), zh: format!("正在接收：{file}")), done, total, kib_s: 0.0 });
             }
             ShareEvent::Saved(path) => {
                 self.receiving = None;
                 let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-                self.banner = Some((if l == Lang::Fr { format!("Reçu : {name}") } else { format!("Received: {name}") }, false));
+                self.banner = Some((loc!(l, fr: format!("Reçu : {name}"), en: format!("Received: {name}"), ja: format!("受信しました：{name}"), zh: format!("已接收：{name}")), false));
             }
             ShareEvent::Sending(SendEvent::Waiting) => {
                 if let Screen::Sending { waiting, .. } = &mut self.screen {
@@ -253,18 +309,34 @@ impl Share {
                 self.cancel = None;
                 self.screen = Screen::Devices;
                 self.banner = Some(match result {
-                    Ok(Outcome::Sent { .. }) | Ok(Outcome::MessageDelivered) => (if l == Lang::Fr { format!("Envoyé à {to}") } else { format!("Sent to {to}") }, false),
-                    Ok(Outcome::Declined) => (if l == Lang::Fr { format!("{to} a refusé") } else { format!("{to} declined") }, true),
-                    Ok(Outcome::Busy) => (if l == Lang::Fr { format!("{to} est occupé avec un autre transfert") } else { format!("{to} is busy with another transfer") }, true),
-                    Ok(Outcome::PinRequired) => (if l == Lang::Fr { format!("{to} demande un code PIN (non géré)") } else { format!("{to} asks for a PIN (not supported)") }, true),
-                    Err(e) => (e, true),
+                    Ok(Outcome::Sent { .. }) | Ok(Outcome::MessageDelivered) => {
+                        (loc!(l, fr: format!("Envoyé à {to}"), en: format!("Sent to {to}"), ja: format!("{to} に送信しました"), zh: format!("已发送到 {to}")), false)
+                    }
+                    Ok(Outcome::Declined) => (loc!(l, fr: format!("{to} a refusé"), en: format!("{to} declined"), ja: format!("{to} が拒否しました"), zh: format!("{to} 已拒绝")), true),
+                    Ok(Outcome::Busy) => (
+                        loc!(l,
+                            fr: format!("{to} est occupé avec un autre transfert"),
+                            en: format!("{to} is busy with another transfer"),
+                            ja: format!("{to} は別の転送中です"),
+                            zh: format!("{to} 正忙于另一项传输")),
+                        true,
+                    ),
+                    Ok(Outcome::PinRequired) => (
+                        loc!(l,
+                            fr: format!("{to} demande un code PIN (non géré)"),
+                            en: format!("{to} asks for a PIN (not supported)"),
+                            ja: format!("{to} がPINを要求しています（未対応）"),
+                            zh: format!("{to} 需要PIN码（暂不支持）")),
+                        true,
+                    ),
+                    Err(e) => (localize_error(l, e), true),
                 });
             }
             ShareEvent::Added(result) => {
                 self.screen = Screen::Devices;
                 self.banner = Some(match result {
-                    Ok(p) => (if l == Lang::Fr { format!("Ajouté : {}", p.info.alias) } else { format!("Added: {}", p.info.alias) }, false),
-                    Err(e) => (e, true),
+                    Ok(p) => (loc!(l, fr: format!("Ajouté : {}", p.info.alias), en: format!("Added: {}", p.info.alias), ja: format!("追加しました：{}", p.info.alias), zh: format!("已添加：{}", p.info.alias)), false),
+                    Err(e) => (localize_error(l, e), true),
                 });
             }
         }
@@ -322,7 +394,7 @@ impl Share {
                     Key::Enter => {
                         if let Some(peer) = self.backend.peers().get(self.selected).cloned() {
                             let files = sendable_files(&self.out_dir);
-                            let items = files.iter().map(|f| file_label(&self.out_dir, f)).collect();
+                            let items = files.iter().map(|f| file_label(l, &self.out_dir, f)).collect();
                             self.screen = Screen::Files { peer, files, items, selected: 0 };
                         }
                     }
@@ -338,9 +410,18 @@ impl Share {
                     let size = std::fs::metadata(&file).map(|m| m.len()).unwrap_or(0);
                     let name = file.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                     let lines = vec![
-                        if l == Lang::Fr { format!("Envoyer ce fichier à {} ?", peer.info.alias) } else { format!("Send this file to {}?", peer.info.alias) },
-                        format!("{name} ({})", size_text(size)),
-                        txt(l, "Le fichier quitte l'appareil et passe par le réseau local.", "The file leaves the device over the local network.").to_string(),
+                        loc!(l,
+                            fr: format!("Envoyer ce fichier à {} ?", peer.info.alias),
+                            en: format!("Send this file to {}?", peer.info.alias),
+                            ja: format!("このファイルを {} に送信しますか？", peer.info.alias),
+                            zh: format!("将此文件发送给 {} 吗？", peer.info.alias)),
+                        format!("{name} ({})", size_text(l, size)),
+                        loc!(l,
+                            fr: "Le fichier quitte l'appareil et passe par le réseau local.",
+                            en: "The file leaves the device over the local network.",
+                            ja: "ファイルは機器の外に出て、ローカルネットワークを通ります。",
+                            zh: "文件将离开本设备，通过本地网络传输。")
+                        .to_string(),
                     ];
                     let peer = peer.clone();
                     self.screen = Screen::Confirm { peer, file, lines };
@@ -351,7 +432,7 @@ impl Share {
                 Key::Esc => {
                     let (peer, dir) = (peer.clone(), self.out_dir.clone());
                     let files = sendable_files(&dir);
-                    let items = files.iter().map(|f| file_label(&dir, f)).collect();
+                    let items = files.iter().map(|f| file_label(l, &dir, f)).collect();
                     self.screen = Screen::Files { peer, files, items, selected: 0 };
                 }
                 Key::Char('y' | 'Y') => {
@@ -626,9 +707,9 @@ mod tests {
 
     #[test]
     fn size_text_and_labels() {
-        assert_eq!(size_text(100), "1 Ko");
-        assert_eq!(size_text(2048), "2 Ko");
-        assert_eq!(size_text(1 << 20), "1.0 Mo");
-        assert_eq!(size_text(3 << 19), "1.5 Mo");
+        assert_eq!(size_text(Lang::Fr, 100), "1 Ko");
+        assert_eq!(size_text(Lang::Fr, 2048), "2 Ko");
+        assert_eq!(size_text(Lang::Fr, 1 << 20), "1.0 Mo");
+        assert_eq!(size_text(Lang::Fr, 3 << 19), "1.5 Mo");
     }
 }

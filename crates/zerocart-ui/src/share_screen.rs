@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! The screens of the file sharing (ZeroSend): the devices around, the files to send, the confirmation, the progress and
 //! the request of another device that wants to send here. Plain data in, pixels out.
+use crate::loc;
 use crate::style::*;
 use crate::widgets::Painter;
 use crate::{Lang, ProgressView, SCREEN_H, SCREEN_W};
@@ -25,8 +26,12 @@ pub enum ShareBody<'a> {
 }
 
 fn bar(p: &mut Painter, lang: Lang, alias: &str) {
-    let fr = lang == Lang::Fr;
-    p.bar("ZEROSEND", &if fr { format!("visible sous : {alias}") } else { format!("visible as: {alias}") }, None);
+    let label = loc!(lang,
+        fr: format!("visible sous : {alias}"),
+        en: format!("visible as: {alias}"),
+        ja: format!("表示名：{alias}"),
+        zh: format!("可见名称：{alias}"));
+    p.bar("ZEROSEND", &label, None);
 }
 
 fn progress_bar(p: &mut Painter, pr: &ProgressView, y: i32) {
@@ -39,25 +44,35 @@ fn progress_bar(p: &mut Painter, pr: &ProgressView, y: i32) {
 }
 
 pub fn render_share(p: &mut Painter, lang: Lang, alias: &str, body: &ShareBody, banner: Option<(&str, bool)>) {
-    let fr = lang == Lang::Fr;
     p.canvas.fill_rect(0, 0, SCREEN_W, SCREEN_H, BACKGROUND);
     p.frame();
     bar(p, lang, alias);
     match body {
         ShareBody::Devices { rows, selected, discovering, port, receiving } => {
-            let note = match (*discovering, fr) {
-                (true, true) => format!("Port {port}. Les appareils LocalSend du réseau apparaissent ici."),
-                (true, false) => format!("Port {port}. LocalSend devices on the network show up here."),
-                (false, true) => format!("Port {port}. Détection automatique impossible : A ajoute un appareil par son adresse."),
-                (false, false) => format!("Port {port}. Auto-discovery is not available: A adds a device by address."),
+            let note = if *discovering {
+                loc!(lang,
+                    fr: format!("Port {port}. Les appareils LocalSend du réseau apparaissent ici."),
+                    en: format!("Port {port}. LocalSend devices on the network show up here."),
+                    ja: format!("ポート {port}。ネットワーク上のLocalSend機器がここに表示されます。"),
+                    zh: format!("端口 {port}。网络中的LocalSend设备会显示在这里。"))
+            } else {
+                loc!(lang,
+                    fr: format!("Port {port}. Détection automatique impossible : A ajoute un appareil par son adresse."),
+                    en: format!("Port {port}. Auto-discovery is not available: A adds a device by address."),
+                    ja: format!("ポート {port}。自動検出不可：Aでアドレスを指定して追加。"),
+                    zh: format!("端口 {port}。无法自动发现：按A通过地址添加设备。"))
             };
             p.text(&note, 9, false, if *discovering { DIM } else { PRIMARY }, 14, 27, Some(SCREEN_W - 28));
             if let Some(r) = receiving {
                 p.text(&r.label, 10, true, TEXT, 14, 44, Some(SCREEN_W - 28));
                 progress_bar(p, r, 58);
             } else if rows.is_empty() {
-                p.text(if fr { "Aucun appareil trouvé." } else { "No device found." }, 12, false, DIM, 14, 56, Some(SCREEN_W - 28));
-                p.text(if fr { "Ouvrez LocalSend sur votre téléphone ou PC (même Wi-Fi)." } else { "Open LocalSend on your phone or PC (same Wi-Fi)." }, 9, false, DIM, 14, 74, Some(SCREEN_W - 28));
+                p.text(loc!(lang, fr: "Aucun appareil trouvé.", en: "No device found.", ja: "機器が見つかりません。", zh: "未找到设备。"), 12, false, DIM, 14, 56, Some(SCREEN_W - 28));
+                p.text(loc!(lang,
+                    fr: "Ouvrez LocalSend sur votre téléphone ou PC (même Wi-Fi).",
+                    en: "Open LocalSend on your phone or PC (same Wi-Fi).",
+                    ja: "スマホやPCでLocalSendを開いてください（同じWi-Fi）。",
+                    zh: "请在手机或电脑上打开LocalSend（同一Wi-Fi）。"), 9, false, DIM, 14, 74, Some(SCREEN_W - 28));
             } else {
                 let first = selected.saturating_sub(3).min(rows.len().saturating_sub(4));
                 for (i, r) in rows.iter().enumerate().skip(first).take(4) {
@@ -73,19 +88,23 @@ pub fn render_share(p: &mut Painter, lang: Lang, alias: &str, body: &ShareBody, 
             }
             p.footer(
                 &[
-                    ("F X", if fr { "choisir" } else { "pick" }),
-                    ("Enter", if fr { "envoyer" } else { "send" }),
-                    ("A", if fr { "adresse" } else { "address" }),
-                    ("R", if fr { "relire" } else { "rescan" }),
-                    ("Esc", if fr { "retour" } else { "back" }),
+                    ("F X", loc::word::pick(lang)),
+                    ("Enter", loc::word::send(lang)),
+                    ("A", loc!(lang, fr: "adresse", en: "address", ja: "アドレス", zh: "地址")),
+                    ("R", loc!(lang, fr: "relire", en: "rescan", ja: "再検索", zh: "重新搜索")),
+                    ("Esc", loc::word::back(lang)),
                 ],
                 banner,
             );
         }
         ShareBody::Files { to, items, selected } => {
-            p.text(&if fr { format!("Envoyer à {to} :") } else { format!("Send to {to}:") }, 11, true, TEXT, 14, 29, Some(SCREEN_W - 28));
+            p.text(&loc!(lang, fr: format!("Envoyer à {to} :"), en: format!("Send to {to}:"), ja: format!("{to} に送信："), zh: format!("发送到 {to}：")), 11, true, TEXT, 14, 29, Some(SCREEN_W - 28));
             if items.is_empty() {
-                p.text(if fr { "Aucun fichier dans ~/zerocart (dumps, sauvegardes)." } else { "No file in ~/zerocart (dumps, saves)." }, 10, false, DIM, 14, 56, Some(SCREEN_W - 28));
+                p.text(loc!(lang,
+                    fr: "Aucun fichier dans ~/zerocart (dumps, sauvegardes).",
+                    en: "No file in ~/zerocart (dumps, saves).",
+                    ja: "~/zerocart にファイルがありません（ダンプ・セーブ）。",
+                    zh: "~/zerocart 中没有文件（转储、存档）。"), 10, false, DIM, 14, 56, Some(SCREEN_W - 28));
             }
             let first = selected.saturating_sub(3).min(items.len().saturating_sub(4));
             for (row, item) in items.iter().enumerate().skip(first).take(4) {
@@ -97,40 +116,54 @@ pub fn render_share(p: &mut Painter, lang: Lang, alias: &str, body: &ShareBody, 
                 }
                 p.text(item, 11, sel, if sel { TEXT } else { DIM }, 26, y + 2, Some(SCREEN_W - 44));
             }
-            p.footer(&[("F X", if fr { "choisir" } else { "pick" }), ("Enter", "ok"), ("Esc", if fr { "retour" } else { "back" })], banner);
+            p.footer(&[("F X", loc::word::pick(lang)), ("Enter", "ok"), ("Esc", loc::word::back(lang))], banner);
         }
         ShareBody::Confirm { lines } => {
             let mut y = 28;
             for (i, l) in lines.iter().enumerate() {
                 y += 1 + p.paragraph(l, 11, i == 0, if i == 0 { ERROR } else { TEXT }, 14, y, SCREEN_W - 28) as i32 * 14;
             }
-            p.footer(&[("Y", if fr { "envoyer" } else { "send" }), ("Esc", if fr { "annuler" } else { "cancel" })], banner);
+            p.footer(&[("Y", loc::word::send(lang)), ("Esc", loc::word::cancel(lang))], banner);
         }
         ShareBody::Input { text, busy } => {
-            p.text(if fr { "Adresse de l'appareil (ex. 100.64.0.7 ou 192.168.1.20:53317) :" } else { "Device address (e.g. 100.64.0.7 or 192.168.1.20:53317):" }, 10, false, DIM, 14, 32, Some(SCREEN_W - 28));
+            p.text(loc!(lang,
+                fr: "Adresse de l'appareil (ex. 100.64.0.7 ou 192.168.1.20:53317) :",
+                en: "Device address (e.g. 100.64.0.7 or 192.168.1.20:53317):",
+                ja: "機器のアドレス（例：100.64.0.7 または 192.168.1.20:53317）：",
+                zh: "设备地址（例如 100.64.0.7 或 192.168.1.20:53317）："), 10, false, DIM, 14, 32, Some(SCREEN_W - 28));
             p.canvas.bordered(14, 56, SCREEN_W - 28, 22, BUTTON, 2, ACCENT);
             p.text(&format!("{text}_"), 12, false, TEXT, 20, 60, Some(SCREEN_W - 40));
             if *busy {
-                p.text(if fr { "Connexion..." } else { "Connecting..." }, 10, false, PRIMARY, 14, 88, Some(SCREEN_W - 28));
+                p.text(loc!(lang, fr: "Connexion...", en: "Connecting...", ja: "接続中...", zh: "正在连接..."), 10, false, PRIMARY, 14, 88, Some(SCREEN_W - 28));
             }
-            p.footer(&[("Enter", if fr { "ajouter" } else { "add" }), ("Esc", if fr { "annuler" } else { "cancel" })], banner);
+            p.footer(&[("Enter", loc!(lang, fr: "ajouter", en: "add", ja: "追加", zh: "添加")), ("Esc", loc::word::cancel(lang))], banner);
         }
         ShareBody::Sending { to, progress, waiting } => {
-            p.text(&if fr { format!("Envoi à {to}") } else { format!("Sending to {to}") }, 12, true, TEXT, 14, 34, Some(SCREEN_W - 28));
+            p.text(&loc!(lang, fr: format!("Envoi à {to}"), en: format!("Sending to {to}"), ja: format!("{to} へ送信中"), zh: format!("正在发送到 {to}")), 12, true, TEXT, 14, 34, Some(SCREEN_W - 28));
             if *waiting {
-                p.text(if fr { "En attente de la réponse de l'autre appareil..." } else { "Waiting for the other device to accept..." }, 10, false, PRIMARY, 14, 58, Some(SCREEN_W - 28));
+                p.text(loc!(lang,
+                    fr: "En attente de la réponse de l'autre appareil...",
+                    en: "Waiting for the other device to accept...",
+                    ja: "相手の機器の応答を待っています...",
+                    zh: "正在等待对方设备响应..."), 10, false, PRIMARY, 14, 58, Some(SCREEN_W - 28));
             } else {
                 p.text(&progress.label, 10, false, DIM, 14, 56, Some(SCREEN_W - 28));
                 progress_bar(p, progress, 74);
             }
-            p.footer(&[("Esc", if fr { "annuler" } else { "cancel" })], banner);
+            p.footer(&[("Esc", loc::word::cancel(lang))], banner);
         }
         ShareBody::Incoming { lines } => {
             let mut y = 28;
             for (i, l) in lines.iter().enumerate() {
                 y += 1 + p.paragraph(l, 11, i == 0, if i == 0 { PRIMARY } else { TEXT }, 14, y, SCREEN_W - 28) as i32 * 14;
             }
-            p.footer(&[("Y", if fr { "accepter" } else { "accept" }), ("N", if fr { "refuser" } else { "decline" })], None);
+            p.footer(
+                &[
+                    ("Y", loc!(lang, fr: "accepter", en: "accept", ja: "受け入れる", zh: "接受")),
+                    ("N", loc!(lang, fr: "refuser", en: "decline", ja: "拒否", zh: "拒绝")),
+                ],
+                None,
+            );
         }
     }
 }

@@ -1,18 +1,20 @@
 //! ZeroCart for the CardputerZero.
-//!   zerocart-app [--db DIR] [--out DIR] [--lang fr|en] [--png OUT.png --tab info|actions|tools --reader gbflash|chis]
+//!   zerocart-app [--db DIR] [--out DIR] [--lang fr|en|ja|zh] [--png OUT.png --tab info|actions|tools --reader gbflash|chis]
 //! `--png` renders a demo frame to a file and exits (no display, no reader): used to check the screens.
 mod app;
 mod fb;
 mod readers;
 mod input;
+mod msg;
 mod screenshot;
+mod settings;
 mod share;
 mod worker;
 
 use app::App;
 use zerocart_ui::{CartView, ProgressView, ReaderView, Tab, View};
 use std::path::PathBuf;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU8};
 use std::sync::mpsc::channel;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -166,8 +168,8 @@ fn demo_png(args: &[String], out: &str, lang: Lang, fonts: &Fonts) -> Result<(),
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let lang = if arg(&args, "--lang").as_deref() == Some("en") { Lang::En } else { Lang::Fr };
-    let fonts = match Fonts::load(lang) {
+    let lang = settings::initial_lang(arg(&args, "--lang").as_deref());
+    let mut fonts = match Fonts::load(lang) {
         Ok(f) => f,
         Err(e) => {
             eprintln!("zerocart: {e}");
@@ -193,13 +195,16 @@ fn main() {
     let cancel = Arc::new(AtomicBool::new(false));
     let (cmd_tx, cmd_rx) = channel();
     let (ev_tx, ev_rx) = channel();
+    let lang_cell = Arc::new(AtomicU8::new(lang.index()));
     let worker = worker::Worker {
+        lang: lang_cell.clone(),
         cancel: cancel.clone(),
         out_dir: out_dir.clone(),
         db_dir: find_db(&args),
     };
     let handle = std::thread::spawn(move || worker.run(cmd_rx, ev_tx));
     let mut app = App::new(lang, cmd_tx.clone(), cancel, out_dir);
+    app.lang_cell = Some(lang_cell);
     // Test aid: `--reader gbx|chis|krikzz --system gb|gbc|gba|md` skips the start screens.
     if let (Some(r), Some(sy)) = (arg(&args, "--reader"), arg(&args, "--system")) {
         let kind = match r.as_str() {
@@ -257,6 +262,12 @@ fn main() {
         }
         while let Ok(e) = ev_rx.try_recv() {
             app.on_event(e);
+        }
+        if !fonts.serves(app.lang) {
+            // Simplified Chinese uses another face of the collection than the other three languages
+            if let Ok(f) = Fonts::load(app.lang) {
+                fonts = f;
+            }
         }
         if app.take_dirty() {
             let mut p = Painter { canvas: &mut canvas, fonts: &fonts };

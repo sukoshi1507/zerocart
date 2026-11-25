@@ -4,6 +4,8 @@
 // canvas, font, style, widgets and i18n were copied from ZeroTag (MIT, see THIRD_PARTY.md) so that this
 // project does not depend on it.
 
+#[macro_use]
+pub mod loc;
 pub mod canvas;
 pub mod font;
 pub mod icons;
@@ -57,16 +59,11 @@ impl Action {
         matches!(self, Action::WriteSave | Action::FlashRom)
     }
     pub fn label(self, lang: Lang) -> &'static str {
-        let fr = lang == Lang::Fr;
-        match (self, fr) {
-            (Action::ReadRom, true) => "Lire la ROM",
-            (Action::ReadRom, false) => "Read ROM",
-            (Action::ReadSave, true) => "Lire la sauvegarde",
-            (Action::ReadSave, false) => "Read save",
-            (Action::WriteSave, true) => "Écrire la sauvegarde",
-            (Action::WriteSave, false) => "Write save",
-            (Action::FlashRom, true) => "Flasher une ROM",
-            (Action::FlashRom, false) => "Flash a ROM",
+        match self {
+            Action::ReadRom => loc!(lang, fr: "Lire la ROM", en: "Read ROM", ja: "ROMを読み出す", zh: "读取ROM"),
+            Action::ReadSave => loc!(lang, fr: "Lire la sauvegarde", en: "Read save", ja: "セーブを読み出す", zh: "读取存档"),
+            Action::WriteSave => loc!(lang, fr: "Écrire la sauvegarde", en: "Write save", ja: "セーブを書き込む", zh: "写入存档"),
+            Action::FlashRom => loc!(lang, fr: "Flasher une ROM", en: "Flash a ROM", ja: "ROMを書き込む", zh: "烧录ROM"),
         }
     }
 }
@@ -122,23 +119,20 @@ pub struct View<'a> {
 }
 
 fn tab_name(t: Tab, lang: Lang) -> &'static str {
-    match (t, lang == Lang::Fr) {
-        (Tab::Info, true) => "Cartouche",
-        (Tab::Info, false) => "Cartridge",
-        (Tab::Actions, true) => "Actions",
-        (Tab::Actions, false) => "Actions",
-        (Tab::Tools, true) => "Outils",
-        (Tab::Tools, false) => "Tools",
+    match t {
+        Tab::Info => loc!(lang, fr: "Cartouche", en: "Cartridge", ja: "カート", zh: "卡带"),
+        Tab::Actions => loc!(lang, fr: "Actions", en: "Actions", ja: "操作", zh: "操作"),
+        Tab::Tools => loc!(lang, fr: "Outils", en: "Tools", ja: "ツール", zh: "工具"),
     }
 }
 
 pub fn render(p: &mut Painter, v: &View) {
-    let fr = v.lang == Lang::Fr;
+    let lang = v.lang;
     p.canvas.fill_rect(0, 0, SCREEN_W, SCREEN_H, BACKGROUND);
     p.frame();
     match v.reader {
         Some(r) => p.bar(format!("{} {}", r.name, r.firmware).trim(), "", None),
-        None => p.bar("ZEROCART", if fr { "aucun lecteur" } else { "no reader" }, None),
+        None => p.bar("ZEROCART", loc!(lang, fr: "aucun lecteur", en: "no reader", ja: "リーダーなし", zh: "无读卡器"), None),
     }
     if let Some(r) = v.reader {
         let w = p.fonts.width(r.voltage, 10, true);
@@ -166,35 +160,34 @@ pub fn render(p: &mut Painter, v: &View) {
         Tab::Tools => tools(p, v),
     }
 
+    let tab_hint = loc!(lang, fr: "onglet", en: "tab", ja: "タブ", zh: "标签");
+    let quit_hint = loc!(lang, fr: "quitter", en: "quit", ja: "終了", zh: "退出");
+    let no_voltage = v.reader.is_some_and(|r| r.voltage.is_empty());
     let hints: Vec<(&str, &str)> = match (v.tab, v.progress.is_some()) {
-        (_, true) => vec![("Esc", if fr { "annuler" } else { "cancel" })],
+        (_, true) => vec![("Esc", loc!(lang, fr: "annuler", en: "cancel", ja: "中止", zh: "取消"))],
         (Tab::Tools, _) => vec![
-            ("Z C", if fr { "onglet" } else { "tab" }),
-            ("Enter", if fr { "analyser" } else { "analyse" }),
-            ("F X", if fr { "défiler" } else { "scroll" }),
-            ("Esc", if fr { "quitter" } else { "quit" }),
+            ("Z C", tab_hint),
+            ("Enter", loc!(lang, fr: "analyser", en: "analyse", ja: "解析", zh: "分析")),
+            ("F X", loc!(lang, fr: "défiler", en: "scroll", ja: "スクロール", zh: "滚动")),
+            ("Esc", quit_hint),
         ],
         (Tab::Actions, _) => vec![
-            ("Z C", if fr { "onglet" } else { "tab" }),
-            ("F X", if fr { "choisir" } else { "pick" }),
-            ("Enter", if fr { "lancer" } else { "run" }),
-            ("Esc", if fr { "quitter" } else { "quit" }),
+            ("Z C", tab_hint),
+            ("F X", loc!(lang, fr: "choisir", en: "pick", ja: "選択", zh: "选择")),
+            ("Enter", loc!(lang, fr: "lancer", en: "run", ja: "実行", zh: "执行")),
+            ("Esc", quit_hint),
         ],
         _ => vec![
-            ("Z C", if fr { "onglet" } else { "tab" }),
-            ("R", match (v.reader.is_some_and(|r| r.voltage.is_empty()), fr) {
-                (true, true) => "lire GBA",
-                (true, false) => "read GBA",
-                (false, true) => "lire GBA 3,3V",
-                (false, false) => "read GBA 3.3V",
+            ("Z C", tab_hint),
+            ("R", match no_voltage {
+                true => loc!(lang, fr: "lire GBA", en: "read GBA", ja: "GBA読出", zh: "读GBA"),
+                false => loc!(lang, fr: "lire GBA 3,3V", en: "read GBA 3.3V", ja: "GBA読出 3.3V", zh: "读GBA 3.3V"),
             }),
-            ("G", match (v.reader.is_some_and(|r| r.voltage.is_empty()), fr) {
-                (true, true) => "lire GB",
-                (true, false) => "read GB",
-                (false, true) => "lire GB 5V",
-                (false, false) => "read GB 5V",
+            ("G", match no_voltage {
+                true => loc!(lang, fr: "lire GB", en: "read GB", ja: "GB読出", zh: "读GB"),
+                false => loc!(lang, fr: "lire GB 5V", en: "read GB 5V", ja: "GB読出 5V", zh: "读GB 5V"),
             }),
-            ("Esc", if fr { "quitter" } else { "quit" }),
+            ("Esc", quit_hint),
         ],
     };
     p.footer(&hints, v.banner);
@@ -204,19 +197,25 @@ pub fn render(p: &mut Painter, v: &View) {
 pub const ANALYSIS_ROWS: usize = 6;
 
 fn tools(p: &mut Painter, v: &View) {
-    let fr = v.lang == Lang::Fr;
+    let lang = v.lang;
     let x = 14;
     let Some(lines) = v.analysis else {
         let msg = if v.analysing {
-            if fr { "Analyse de la puce flash..." } else { "Analysing the flash chip..." }
-        } else if fr {
-            "Entrée : analyser la puce flash (CFI) de la cartouche"
+            loc!(lang, fr: "Analyse de la puce flash...", en: "Analysing the flash chip...", ja: "フラッシュチップを解析中...", zh: "正在分析闪存芯片...")
         } else {
-            "Enter: analyse the cartridge's flash chip (CFI)"
+            loc!(lang,
+                fr: "Entrée : analyser la puce flash (CFI) de la cartouche",
+                en: "Enter: analyse the cartridge's flash chip (CFI)",
+                ja: "Enter：カートのフラッシュチップ(CFI)を解析",
+                zh: "Enter：分析卡带的闪存芯片(CFI)")
         };
         p.text(msg, 11, false, if v.analysing { PRIMARY } else { DIM }, x, 62, Some(SCREEN_W - 28));
         if !v.analysing {
-            let note = if fr { "Lecture seule : rien n'est effacé ni écrit." } else { "Read-only: nothing is erased or written." };
+            let note = loc!(lang,
+                fr: "Lecture seule : rien n'est effacé ni écrit.",
+                en: "Read-only: nothing is erased or written.",
+                ja: "読み取り専用：消去も書き込みもしません。",
+                zh: "只读：不会擦除或写入任何内容。");
             p.text(note, 10, false, DIM, x, 80, Some(SCREEN_W - 28));
         }
         return;
@@ -235,7 +234,7 @@ fn tools(p: &mut Painter, v: &View) {
 }
 
 fn overlay(p: &mut Painter, v: &View, o: &Overlay) {
-    let fr = v.lang == Lang::Fr;
+    let lang = v.lang;
     match o {
         Overlay::Picker { title, items, selected } => {
             p.text(title, 11, true, TEXT, 14, 47, Some(SCREEN_W - 28));
@@ -249,30 +248,45 @@ fn overlay(p: &mut Painter, v: &View, o: &Overlay) {
                 }
                 p.text(item, 11, sel, if sel { TEXT } else { DIM }, 26, y + 2, Some(SCREEN_W - 44));
             }
-            p.footer(&[("F X", if fr { "choisir" } else { "pick" }), ("Enter", if fr { "ok" } else { "ok" }), ("Esc", if fr { "retour" } else { "back" })], v.banner);
+            p.footer(
+                &[
+                    ("F X", loc!(lang, fr: "choisir", en: "pick", ja: "選択", zh: "选择")),
+                    ("Enter", "ok"),
+                    ("Esc", loc!(lang, fr: "retour", en: "back", ja: "戻る", zh: "返回")),
+                ],
+                v.banner,
+            );
         }
         Overlay::Confirm { lines } => {
             let mut y = 47;
             for (i, l) in lines.iter().enumerate() {
                 y += 1 + p.paragraph(l, 11, i == 0, if i == 0 { ERROR } else { TEXT }, 14, y, SCREEN_W - 28) as i32 * 14;
             }
-            p.footer(&[("Y", if fr { "confirmer" } else { "confirm" }), ("Esc", if fr { "annuler" } else { "cancel" })], v.banner);
+            p.footer(
+                &[
+                    ("Y", loc!(lang, fr: "confirmer", en: "confirm", ja: "確定", zh: "确认")),
+                    ("Esc", loc!(lang, fr: "annuler", en: "cancel", ja: "中止", zh: "取消")),
+                ],
+                v.banner,
+            );
         }
     }
 }
 
 fn info(p: &mut Painter, v: &View) {
-    let fr = v.lang == Lang::Fr;
+    let lang = v.lang;
     let (x, w) = (14, SCREEN_W - 28);
     let Some(c) = v.cart else {
         let msg = if v.scanning {
-            if fr { "Lecture de la cartouche..." } else { "Reading the cartridge..." }
+            loc!(lang, fr: "Lecture de la cartouche...", en: "Reading the cartridge...", ja: "カートを読み取り中...", zh: "正在读取卡带...")
         } else if v.reader.is_none() {
-            if fr { "Branchez un GBFlash / GBxCart RW" } else { "Plug in a GBFlash / GBxCart RW" }
-        } else if fr {
-            "Aucune cartouche reconnue"
+            loc!(lang,
+                fr: "Branchez un lecteur",
+                en: "Plug in a reader",
+                ja: "リーダーを接続してください",
+                zh: "请连接读卡器")
         } else {
-            "No cartridge recognised"
+            loc!(lang, fr: "Aucune cartouche reconnue", en: "No cartridge recognised", ja: "カートを認識できません", zh: "未识别到卡带")
         };
         p.text(msg, 12, false, DIM, x, 66, Some(w));
         return;
@@ -280,23 +294,30 @@ fn info(p: &mut Painter, v: &View) {
     p.text(&c.title, 14, true, TEXT, x, 48, Some(w - 60));
     let w_sys = p.fonts.width(c.system, 10, true) + 10;
     p.chip(SCREEN_W - 14 - w_sys, 48, w_sys, 16, c.system, 10, true, PRIMARY, BORDER);
+    let header_label = loc!(lang, fr: "En-tête", en: "Header", ja: "ヘッダー", zh: "文件头");
     let rows = [
-        (if fr { "Code" } else { "Code" }, c.code.clone()),
+        (loc!(lang, fr: "Code", en: "Code", ja: "コード", zh: "编号"), c.code.clone()),
         ("ROM", c.rom.clone()),
-        (if fr { "Sauvegarde" } else { "Save" }, c.save.clone()),
-        (if fr { "Infos" } else { "Info" }, c.database.clone().unwrap_or_else(|| (if fr { "jeu inconnu" } else { "unknown game" }).into())),
-        (if fr { "En-tête" } else { "Header" }, (if c.header_ok { "OK" } else if fr { "invalide" } else { "invalid" }).into()),
+        (loc!(lang, fr: "Sauvegarde", en: "Save", ja: "セーブ", zh: "存档"), c.save.clone()),
+        (
+            loc!(lang, fr: "Infos", en: "Info", ja: "情報", zh: "信息"),
+            c.database.clone().unwrap_or_else(|| loc!(lang, fr: "jeu inconnu", en: "unknown game", ja: "不明なゲーム", zh: "未知游戏").into()),
+        ),
+        (
+            header_label,
+            if c.header_ok { "OK" } else { loc!(lang, fr: "invalide", en: "invalid", ja: "無効", zh: "无效") }.into(),
+        ),
     ];
     for (i, (k, val)) in rows.iter().enumerate() {
         let y = 68 + i as i32 * 15;
         p.text(k, 10, false, DIM, x, y + 1, None);
-        let color = if *k == "En-tête" || *k == "Header" { if c.header_ok { PRIMARY } else { ERROR } } else { TEXT };
+        let color = if *k == header_label { if c.header_ok { PRIMARY } else { ERROR } } else { TEXT };
         p.text(val, 11, false, color, x + 78, y, Some(w - 78));
     }
 }
 
 fn actions(p: &mut Painter, v: &View) {
-    let fr = v.lang == Lang::Fr;
+    let lang = v.lang;
     if let Some(pr) = v.progress {
         p.text(&pr.label, 12, true, TEXT, 14, 54, Some(SCREEN_W - 28));
         let (bx, by, bw, bh) = (14, 78, SCREEN_W - 28, 14);
@@ -317,7 +338,7 @@ fn actions(p: &mut Painter, v: &View) {
         }
         p.text(a.label(v.lang), 12, sel, if sel { TEXT } else { DIM }, 26, y + 3, None);
         if a.writes() {
-            p.text_right(if fr { "écrit" } else { "writes" }, 9, false, if sel { ERROR } else { BORDER }, 16, y + 6);
+            p.text_right(loc!(lang, fr: "écrit", en: "writes", ja: "書込", zh: "写入"), 9, false, if sel { ERROR } else { BORDER }, 16, y + 6);
         }
     }
 }
@@ -354,5 +375,30 @@ mod tests {
             render(&mut p, &View { analysis: None, analysis_scroll: 0, analysing: false, overlay: None, lang: Lang::Fr, tab, reader: Some(&reader), cart: Some(&cart), scanning: false, action_sel: 0, progress: None, banner: None });
         }
         assert!(canvas.get(0, 0).is_some());
+    }
+
+    #[test]
+    fn every_tab_and_overlay_renders_in_all_four_languages() {
+        let mut lang = Lang::Fr;
+        for _ in 0..4 {
+            let Ok(fonts) = Fonts::load(lang) else { return };
+            let mut canvas = Canvas::new(SCREEN_W, SCREEN_H, 0);
+            let reader = ReaderView { name: "GBFlash".into(), firmware: "L15".into(), voltage: "" };
+            let cart = CartView {
+                system: "GBA", title: "MR. DRILLER2".into(), code: "AGB-AD2P".into(), rom: "4 MiB".into(),
+                save: "256K SRAM".into(), database: None, header_ok: false,
+            };
+            let lines = vec!["a".to_string(), "b".to_string()];
+            for tab in Tab::ALL {
+                for overlay in [None, Some(Overlay::Confirm { lines: &lines })] {
+                    let mut p = Painter { canvas: &mut canvas, fonts: &fonts };
+                    render(&mut p, &View { analysis: None, analysis_scroll: 0, analysing: false, overlay, lang, tab, reader: Some(&reader), cart: Some(&cart), scanning: false, action_sel: 0, progress: None, banner: Some(("x", true)) });
+                }
+            }
+            for a in Action::ALL {
+                assert!(!a.label(lang).is_empty());
+            }
+            lang = lang.next();
+        }
     }
 }

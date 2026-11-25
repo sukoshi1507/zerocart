@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::Arc;
 use crate::input::{Key, Routed};
-use zerocart_ui::Lang;
+use zerocart_ui::{loc, Lang};
 
 /// A write action being set up: first a file is picked, then it is confirmed with Y.
 enum Flow {
@@ -52,6 +52,8 @@ pub struct App {
     share: Option<crate::share::Share>,
     share_starter: crate::share::Starter,
     pub lang: Lang,
+    /// The language as the worker thread sees it (its messages are written in it).
+    pub lang_cell: Option<Arc<std::sync::atomic::AtomicU8>>,
     pub tab: Tab,
     pub action_sel: usize,
     pub reader: Option<ReaderView>,
@@ -81,7 +83,7 @@ impl App {
         Self {
             stage: Stage::Splash, system: System::Gb, system_sel: 0, reader_sel: 0, reader_moved: false, detected: Vec::new(), connecting: false,
             splash_since: None, last_scan: None, scanner: Box::new(readers::scan),
-            lang, tab: Tab::Info, action_sel: 0, reader: None, cart: None, scanning: false, progress: None,
+            lang, lang_cell: None, tab: Tab::Info, action_sel: 0, reader: None, cart: None, scanning: false, progress: None,
             banner: None, want_quit: false, dirty: true, tx, cancel, out_dir, flow: Flow::None,
             picker_items: Vec::new(), confirm_lines: Vec::new(), flow_gba: false, flow_md: false,
             analysis: None, analysis_scroll: 0, analysing: false,
@@ -212,6 +214,16 @@ impl App {
         }
     }
 
+    /// Switches to the next language (French, English, Japanese, Simplified Chinese) and remembers the choice.
+    fn next_language(&mut self) {
+        self.lang = self.lang.next();
+        if let Some(cell) = &self.lang_cell {
+            cell.store(self.lang.index(), Ordering::SeqCst);
+        }
+        crate::settings::save_lang(self.lang);
+        self.banner = Some((self.lang.native_name().to_string(), false));
+    }
+
     /// Opens the sharing screen: starts ZeroSend (the certificate, the server on 53317, the announcements).
     fn open_share(&mut self) {
         match crate::share::Share::start(&self.share_starter, self.out_dir.clone(), self.lang) {
@@ -252,6 +264,7 @@ impl App {
                 self.banner = None;
             }
             (Stage::System, Key::Char('s' | 'S')) => self.open_share(),
+            (Stage::System, Key::Char('l' | 'L')) => self.next_language(),
             (Stage::System, Key::Esc) | (Stage::Readers, Key::Esc) => self.back(),
             (Stage::Readers, Key::Up) | (Stage::Readers, Key::Down) if !self.connecting => {
                 let n = self.reader_kinds().len().max(1);
@@ -266,7 +279,11 @@ impl App {
                 } else {
                     let name = kind.label();
                     self.banner = Some((
-                        if self.fr() { format!("{name} : non branché") } else { format!("{name}: not plugged in") },
+                        loc!(self.lang,
+                            fr: format!("{name} : non branché"),
+                            en: format!("{name}: not plugged in"),
+                            ja: format!("{name}：接続されていません"),
+                            zh: format!("{name}：未连接")),
                         true,
                     ));
                 }
@@ -280,9 +297,6 @@ impl App {
         self.scanning || self.connecting
     }
 
-    fn fr(&self) -> bool {
-        self.lang == Lang::Fr
-    }
 
     fn detect(&mut self, dmg: bool) {
         self.scanning = true;
@@ -341,7 +355,7 @@ impl App {
             return;
         }
         if self.cart.is_none() {
-            self.banner = Some(((if self.fr() { "Aucune cartouche" } else { "No cartridge" }).into(), true));
+            self.banner = Some((no_cartridge(self.lang).into(), true));
             return;
         }
         self.banner = None;
@@ -353,37 +367,47 @@ impl App {
 
     fn run_action(&mut self) {
         let action = Action::ALL[self.action_sel];
-        let fr = self.fr();
+        let lang = self.lang;
         let Some(cart) = &self.cart else {
-            self.banner = Some(((if fr { "Aucune cartouche" } else { "No cartridge" }).into(), true));
+            self.banner = Some((no_cartridge(lang).into(), true));
             return;
         };
         self.banner = None;
         let md = self.system == System::MegaDrive;
         if md && action == Action::WriteSave {
             self.banner = Some((
-                (if fr { "Sauvegarde Mega Drive : écriture pas encore gérée" } else { "Mega Drive save writing: not supported yet" }).into(),
+                loc!(lang,
+                    fr: "Sauvegarde Mega Drive : écriture pas encore gérée",
+                    en: "Mega Drive save writing: not supported yet",
+                    ja: "メガドライブのセーブ書き込みは未対応です",
+                    zh: "暂不支持写入Mega Drive存档")
+                .into(),
                 true,
             ));
             return;
         }
         if action.writes() {
             let gba = cart.system == "GBA";
-            let (exts, what): (&[&str], &str) = match action {
-                Action::FlashRom if md => (&["bin", "md", "gen"], "ROM"),
-                Action::FlashRom if gba => (&["gba"], "ROM"),
-                Action::FlashRom => (&["gb", "gbc"], "ROM"),
-                _ => (&["sav"], "sauvegarde"),
+            let exts: &[&str] = match action {
+                Action::FlashRom if md => &["bin", "md", "gen"],
+                Action::FlashRom if gba => &["gba"],
+                Action::FlashRom => &["gb", "gbc"],
+                _ => &["sav"],
             };
             self.flow_gba = gba;
             self.flow_md = md;
             let files = list_files(&self.out_dir, exts);
             if files.is_empty() {
+                let (ext, dir) = (exts[0], self.out_dir.display());
                 self.banner = Some((
-                    format!("Aucun fichier .{} dans {}", exts[0], self.out_dir.display()),
+                    loc!(lang,
+                        fr: format!("Aucun fichier .{ext} dans {dir}"),
+                        en: format!("No .{ext} file in {dir}"),
+                        ja: format!("{dir} に .{ext} ファイルがありません"),
+                        zh: format!("{dir} 中没有 .{ext} 文件"))
+                    ,
                     true,
                 ));
-                let _ = what;
                 return;
             }
             self.picker_items = files.iter().map(|f| describe(f)).collect();
@@ -409,7 +433,8 @@ impl App {
             }
             (Flow::Picking { action, files, selected }, Key::Enter) => {
                 let file = files[selected].clone();
-                self.confirm_lines = if self.flow_md { confirm_text_md(&file) } else { confirm_text(action, &file, self.flow_gba) };
+                self.confirm_lines =
+                    if self.flow_md { confirm_text_md(&file, self.lang) } else { confirm_text(action, &file, self.flow_gba, self.lang) };
                 Flow::Confirming { action, file }
             }
             (f @ Flow::Picking { .. }, _) => f,
@@ -439,19 +464,27 @@ impl App {
                 if cart.is_none() {
                     // Both readers have one connector for every cartridge: a Game Boy cartridge read as GBA (or the
                     // reverse) has no valid header. Say what to try instead of waiting silently.
-                    let fr = self.fr();
-                    self.banner = Some((
-                        match (self.dmg(), fr) {
-                            _ if self.system == System::MegaDrive && fr => "Pas de cartouche Mega Drive reconnue (en-tête SEGA absent)",
-                            _ if self.system == System::MegaDrive => "No Mega Drive cartridge recognised (no SEGA header)",
-                            (false, true) => "Pas de cartouche GBA : est-ce une Game Boy ? (Échap : changer)",
-                            (false, false) => "No GBA cartridge: is it a Game Boy one? (Esc: change)",
-                            (true, true) => "Pas de cartouche Game Boy : est-ce une GBA ? (Échap : changer)",
-                            (true, false) => "No Game Boy cartridge: is it a GBA one? (Esc: change)",
-                        }
-                        .into(),
-                        true,
-                    ));
+                    let lang = self.lang;
+                    let text = if self.system == System::MegaDrive {
+                        loc!(lang,
+                            fr: "Pas de cartouche Mega Drive reconnue (en-tête SEGA absent)",
+                            en: "No Mega Drive cartridge recognised (no SEGA header)",
+                            ja: "メガドライブのカートを認識できません（SEGAヘッダーなし）",
+                            zh: "未识别到Mega Drive卡带（没有SEGA文件头）")
+                    } else if !self.dmg() {
+                        loc!(lang,
+                            fr: "Pas de cartouche GBA : est-ce une Game Boy ? (Échap : changer)",
+                            en: "No GBA cartridge: is it a Game Boy one? (Esc: change)",
+                            ja: "GBAカートがありません。Game Boyでは？（Esc：変更）",
+                            zh: "没有GBA卡带：是Game Boy卡带吗？（Esc：更换）")
+                    } else {
+                        loc!(lang,
+                            fr: "Pas de cartouche Game Boy : est-ce une GBA ? (Échap : changer)",
+                            en: "No Game Boy cartridge: is it a GBA one? (Esc: change)",
+                            ja: "Game Boyカートがありません。GBAでは？（Esc：変更）",
+                            zh: "没有Game Boy卡带：是GBA卡带吗？（Esc：更换）")
+                    };
+                    self.banner = Some((text.into(), true));
                 }
                 self.cart = cart;
                 self.analysis = None; // it described the previous cartridge or mode
@@ -513,7 +546,11 @@ impl App {
         let overlay = match &self.flow {
             Flow::None => None,
             Flow::Picking { action, selected, .. } => Some(Overlay::Picker {
-                title: if *action == Action::FlashRom { "ROM à écrire sur la cartouche :" } else { "Sauvegarde à écrire :" },
+                title: if *action == Action::FlashRom {
+                    loc!(self.lang, fr: "ROM à écrire sur la cartouche :", en: "ROM to write to the cartridge:", ja: "カートに書き込むROM：", zh: "要写入卡带的ROM：")
+                } else {
+                    loc!(self.lang, fr: "Sauvegarde à écrire :", en: "Save to write:", ja: "書き込むセーブ：", zh: "要写入的存档：")
+                },
                 items: &self.picker_items,
                 selected: *selected,
             }),
@@ -944,6 +981,24 @@ mod tests {
     }
 
     #[test]
+    fn l_on_the_system_screen_cycles_the_language_and_tells_the_worker() {
+        let (mut a, _rx) = fresh(vec![]);
+        let cell = Arc::new(std::sync::atomic::AtomicU8::new(Lang::Fr.index()));
+        a.lang_cell = Some(cell.clone());
+        down(&mut a, Key::Enter); // splash -> systems
+        assert_eq!(a.stage, Stage::System);
+        for want in [Lang::En, Lang::Ja, Lang::Zh, Lang::Fr] {
+            down(&mut a, Key::Char('l'));
+            assert_eq!(a.lang, want);
+            assert_eq!(Lang::from_index(cell.load(Ordering::SeqCst)), want);
+            assert_eq!(a.banner, Some((want.native_name().to_string(), false)), "the banner names the new language");
+        }
+        // the screens follow: the Actions labels come from the language
+        a.lang = Lang::Ja;
+        assert_eq!(Action::ReadRom.label(a.lang), "ROMを読み出す");
+    }
+
+    #[test]
     fn start_with_skips_the_start_screens() {
         let (mut a, rx) = fresh(vec![]);
         a.start_with(ReaderKind::GbxCart, System::Gbc);
@@ -1133,42 +1188,88 @@ pub fn list_files(dir: &std::path::Path, exts: &[&str]) -> Vec<PathBuf> {
     v
 }
 
-fn describe(p: &std::path::Path) -> String {
-    let size = std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
-    format!("{}  ({} Ko)", p.file_name().unwrap_or_default().to_string_lossy(), size / 1024)
+fn no_cartridge(lang: Lang) -> &'static str {
+    loc!(lang, fr: "Aucune cartouche", en: "No cartridge", ja: "カートがありません", zh: "没有卡带")
 }
 
-fn confirm_text_md(file: &std::path::Path) -> Vec<String> {
+fn describe(p: &std::path::Path) -> String {
+    let size = std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+    format!("{}  ({} KiB)", p.file_name().unwrap_or_default().to_string_lossy(), size / 1024)
+}
+
+fn confirm_text_md(file: &std::path::Path, lang: Lang) -> Vec<String> {
     let name = file.file_name().unwrap_or_default().to_string_lossy().into_owned();
     let size = std::fs::metadata(file).map(|m| m.len()).unwrap_or(0);
+    let kib = size / 1024;
     let mut v = vec![
-        "ATTENTION : la ROM de la cartouche Mega Drive va être effacée (seuls les secteurs qui diffèrent)".to_string(),
-        format!("Écrire : {name} ({} Ko)", size / 1024),
-        "L'ancienne ROM est d'abord sauvegardée dans backups. Ne pas débrancher pendant l'écriture.".to_string(),
+        loc!(lang,
+            fr: "ATTENTION : la ROM de la cartouche Mega Drive va être effacée (seuls les secteurs qui diffèrent)".to_string(),
+            en: "WARNING: the ROM of the Mega Drive cartridge will be erased (only the sectors that differ)".to_string(),
+            ja: "警告：メガドライブカートのROMを消去します（異なるセクターのみ）".to_string(),
+            zh: "警告：将擦除Mega Drive卡带的ROM（仅限不同的扇区）".to_string()),
+        loc!(lang, fr: format!("Écrire : {name} ({kib} Ko)"), en: format!("Write: {name} ({kib} KiB)"), ja: format!("書き込み：{name}（{kib} KiB）"), zh: format!("写入：{name}（{kib} KiB）")),
+        loc!(lang,
+            fr: "L'ancienne ROM est d'abord sauvegardée dans backups. Ne pas débrancher pendant l'écriture.".to_string(),
+            en: "The old ROM is saved to backups first. Do not unplug while writing.".to_string(),
+            ja: "旧ROMはまずbackupsに保存されます。書き込み中は抜かないでください。".to_string(),
+            zh: "旧ROM会先备份到backups。写入期间请勿拔出。".to_string()),
     ];
     if size > 4 << 20 {
-        v.push("Plus de 4 Mo : la moitié haute de la puce est testée avant d'écrire (refusée si inaccessible).".into());
+        v.push(
+            loc!(lang,
+                fr: "Plus de 4 Mo : la moitié haute de la puce est testée avant d'écrire (refusée si inaccessible).",
+                en: "Over 4 MiB: the upper half of the chip is tested before writing (refused if unreachable).",
+                ja: "4 MiB超：書き込み前にチップ上半分をテストします（使えない場合は中止）。",
+                zh: "超过4 MiB：写入前会测试芯片上半部分（无法访问则拒绝）。")
+            .into(),
+        );
     }
     v
 }
 
-fn confirm_text(action: Action, file: &std::path::Path, gba: bool) -> Vec<String> {
+fn confirm_text(action: Action, file: &std::path::Path, gba: bool, lang: Lang) -> Vec<String> {
     let name = file.file_name().unwrap_or_default().to_string_lossy().into_owned();
+    let write = loc!(lang, fr: format!("Écrire : {name}"), en: format!("Write: {name}"), ja: format!("書き込み：{name}"), zh: format!("写入：{name}"));
     match action {
         Action::FlashRom if gba => vec![
-            "ATTENTION : TOUTE la puce flash de la cartouche va être effacée".into(),
-            format!("Écrire : {name}"),
-            "Toute la puce est d'abord sauvegardée dans backups (plusieurs minutes). Ne pas débrancher pendant l'écriture.".into(),
+            loc!(lang,
+                fr: "ATTENTION : TOUTE la puce flash de la cartouche va être effacée".into(),
+                en: "WARNING: the WHOLE flash chip of the cartridge will be erased".into(),
+                ja: "警告：カートのフラッシュチップ全体を消去します".into(),
+                zh: "警告：将擦除卡带的整个闪存芯片".into()),
+            write,
+            loc!(lang,
+                fr: "Toute la puce est d'abord sauvegardée dans backups (plusieurs minutes). Ne pas débrancher pendant l'écriture.".into(),
+                en: "The whole chip is saved to backups first (several minutes). Do not unplug while writing.".into(),
+                ja: "チップ全体をまずbackupsに保存します（数分）。書き込み中は抜かないでください。".into(),
+                zh: "整个芯片会先备份到backups（需数分钟）。写入期间请勿拔出。".into()),
         ],
         Action::FlashRom => vec![
-            "ATTENTION : la ROM de la cartouche va être effacée".into(),
-            format!("Écrire : {name}"),
-            "L'ancienne ROM est d'abord sauvegardée dans le dossier backups. Ne pas débrancher pendant l'écriture.".into(),
+            loc!(lang,
+                fr: "ATTENTION : la ROM de la cartouche va être effacée".into(),
+                en: "WARNING: the ROM of the cartridge will be erased".into(),
+                ja: "警告：カートのROMを消去します".into(),
+                zh: "警告：将擦除卡带的ROM".into()),
+            write,
+            loc!(lang,
+                fr: "L'ancienne ROM est d'abord sauvegardée dans le dossier backups. Ne pas débrancher pendant l'écriture.".into(),
+                en: "The old ROM is saved to the backups folder first. Do not unplug while writing.".into(),
+                ja: "旧ROMはまずbackupsフォルダに保存されます。書き込み中は抜かないでください。".into(),
+                zh: "旧ROM会先备份到backups文件夹。写入期间请勿拔出。".into()),
         ],
         _ => vec![
-            "ATTENTION : la sauvegarde de la cartouche va être remplacée".into(),
-            format!("Écrire : {name}"),
-            "L'ancienne sauvegarde est gardée dans backups si elle est lisible.".into(),
+            loc!(lang,
+                fr: "ATTENTION : la sauvegarde de la cartouche va être remplacée".into(),
+                en: "WARNING: the cartridge's save will be replaced".into(),
+                ja: "警告：カートのセーブを上書きします".into(),
+                zh: "警告：将替换卡带的存档".into()),
+            write,
+            loc!(lang,
+                fr: "L'ancienne sauvegarde est gardée dans backups si elle est lisible.".into(),
+                en: "The old save is kept in backups if it can be read.".into(),
+                ja: "旧セーブは読み取れればbackupsに保存されます。".into(),
+                zh: "旧存档若可读取，会保留在backups中。".into()),
         ],
     }
 }
+

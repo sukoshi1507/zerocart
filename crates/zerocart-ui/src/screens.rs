@@ -1,29 +1,32 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! The start screens: splash, choice of the system, choice of the reader.
 use crate::icons::{self, Sprite, System};
+use crate::loc;
 use crate::style::*;
 use crate::widgets::Painter;
 use crate::{Lang, SCREEN_H, SCREEN_W};
 
 pub fn render_splash(p: &mut Painter, lang: Lang, version: &str) {
-    let fr = lang == Lang::Fr;
     p.canvas.fill_rect(0, 0, SCREEN_W, SCREEN_H, BACKGROUND);
     p.frame();
     let cell = 4;
     let size = icons::cells(Sprite::Logo) * cell;
     icons::draw(p.canvas, Sprite::Logo, (SCREEN_W - size) / 2, 14, cell);
     p.text_centered("ZEROCART", 18, true, TEXT, 0, 96, SCREEN_W, 22);
-    let sub = if fr { "Lecteur et flasher de cartouches" } else { "Cartridge reader and flasher" };
+    let sub = loc!(lang,
+        fr: "Lecteur et flasher de cartouches",
+        en: "Cartridge reader and flasher",
+        ja: "カートリッジ リーダー＆ライター",
+        zh: "卡带读取与烧录工具");
     p.text_centered(sub, 10, false, DIM, 0, 120, SCREEN_W, 14);
     p.text_centered(&format!("v{version}"), 9, false, BORDER, 0, 140, SCREEN_W, 12);
 }
 
 /// One tile per system; `selected` is an index into [`System::ALL`].
 pub fn render_system(p: &mut Painter, lang: Lang, selected: usize, banner: Option<(&str, bool)>) {
-    let fr = lang == Lang::Fr;
     p.canvas.fill_rect(0, 0, SCREEN_W, SCREEN_H, BACKGROUND);
     p.frame();
-    p.bar("ZEROCART", if fr { "quelle cartouche ?" } else { "which cartridge?" }, None);
+    p.bar("ZEROCART", loc!(lang, fr: "quelle cartouche ?", en: "which cartridge?", ja: "どのカート？", zh: "哪种卡带？"), None);
     let (tile_w, gap, top, tile_h) = (72, 6, 34, 96);
     let left = (SCREEN_W - (4 * tile_w + 3 * gap)) / 2;
     for (i, sys) in System::ALL.iter().enumerate() {
@@ -34,22 +37,20 @@ pub fn render_system(p: &mut Painter, lang: Lang, selected: usize, banner: Optio
         let size = icons::cells(sys.sprite()) * cell;
         icons::draw(p.canvas, sys.sprite(), x + (tile_w - size) / 2, top + 8, cell);
         p.text_centered(sys.label(), 10, sel, if sel { TEXT } else { DIM }, x, top + 64, tile_w, 14);
-        if *sys == System::MegaDrive {
-            p.text_centered(if fr { "bientôt" } else { "soon" }, 9, false, if sel { PRIMARY } else { BORDER }, x, top + 78, tile_w, 12);
-        } else {
-            let v = match sys {
-                System::Gba => "3,3 V",
-                _ => "5 V",
-            };
-            p.text_centered(v, 9, false, if sel { PRIMARY } else { BORDER }, x, top + 78, tile_w, 12);
-        }
+        let v = match sys {
+            System::Gba => "3,3 V",
+            System::MegaDrive => "Krikzz",
+            _ => "5 V",
+        };
+        p.text_centered(v, 9, false, if sel { PRIMARY } else { BORDER }, x, top + 78, tile_w, 12);
     }
     p.footer(
         &[
-            ("Z C", if fr { "choisir" } else { "pick" }),
-            ("Enter", if fr { "ok" } else { "ok" }),
-            ("S", if fr { "partager" } else { "share" }),
-            ("Esc", if fr { "quitter" } else { "quit" }),
+            ("Z C", loc::word::pick(lang)),
+            ("Enter", "ok"),
+            ("S", loc!(lang, fr: "partager", en: "share", ja: "共有", zh: "分享")),
+            ("L", loc!(lang, fr: "langue", en: "lang", ja: "言語", zh: "语言")),
+            ("Esc", loc::word::quit(lang)),
         ],
         banner,
     );
@@ -72,19 +73,25 @@ impl ReaderRow {
 }
 
 pub fn render_readers(p: &mut Painter, lang: Lang, system: System, rows: &[ReaderRow], selected: usize, connecting: bool, banner: Option<(&str, bool)>) {
-    let fr = lang == Lang::Fr;
     p.canvas.fill_rect(0, 0, SCREEN_W, SCREEN_H, BACKGROUND);
     p.frame();
     p.bar("ZEROCART", system.label(), None);
     // the chosen system, small, then the question
     icons::draw(p.canvas, system.sprite(), 12, 28, 2);
-    p.text(if fr { "Quel lecteur est branché ?" } else { "Which reader is plugged in?" }, 12, true, TEXT, 52, 30, Some(SCREEN_W - 64));
+    p.text(loc!(lang, fr: "Quel lecteur est branché ?", en: "Which reader is plugged in?", ja: "どのリーダーを接続しましたか？", zh: "连接的是哪个读卡器？"), 12, true, TEXT, 52, 30, Some(SCREEN_W - 64));
     let found = rows.iter().filter(|r| r.present).count();
-    let line = match (found, fr) {
-        (0, true) => "Aucun lecteur détecté : branchez-en un.",
-        (0, false) => "No reader detected: plug one in.",
-        (_, true) => "Vérification en direct, Entrée pour confirmer.",
-        (_, false) => "Checked live, Enter to confirm.",
+    let line = if found == 0 {
+        loc!(lang,
+            fr: "Aucun lecteur détecté : branchez-en un.",
+            en: "No reader detected: plug one in.",
+            ja: "リーダーが見つかりません。接続してください。",
+            zh: "未检测到读卡器：请连接一个。")
+    } else {
+        loc!(lang,
+            fr: "Vérification en direct, Entrée pour confirmer.",
+            en: "Checked live, Enter to confirm.",
+            ja: "リアルタイム検出。Enterで確定。",
+            zh: "实时检测，按Enter确认。")
     };
     p.text(line, 9, false, if found == 0 { PRIMARY } else { DIM }, 52, 46, Some(SCREEN_W - 64));
     for (i, r) in rows.iter().enumerate() {
@@ -97,17 +104,21 @@ pub fn render_readers(p: &mut Painter, lang: Lang, system: System, rows: &[Reade
         let dot = if r.present { 0x4CD964 } else { 0x7A3A3A };
         p.canvas.fill_rounded(26, y + 8, 8, 8, dot);
         p.text(&r.name, 11, sel, if r.present { TEXT } else { DIM }, 42, y + 5, Some(SCREEN_W - 170));
-        let state = if r.present { if fr { "branché" } else { "plugged" } } else if fr { "non détecté" } else { "not found" };
+        let state = if r.present {
+            loc!(lang, fr: "branché", en: "plugged", ja: "接続済", zh: "已连接")
+        } else {
+            loc!(lang, fr: "non détecté", en: "not found", ja: "未検出", zh: "未检测到")
+        };
         p.text_right(state, 9, false, if r.present { PRIMARY } else { BORDER }, 16, y + 3);
         p.text_right(&r.detail, 8, false, DIM, 16, y + 13);
     }
     let hints: &[(&str, &str)] = &[
-        ("F X", if fr { "choisir" } else { "pick" }),
-        ("Enter", if fr { "confirmer" } else { "confirm" }),
-        ("Esc", if fr { "retour" } else { "back" }),
+        ("F X", loc::word::pick(lang)),
+        ("Enter", loc::word::confirm(lang)),
+        ("Esc", loc::word::back(lang)),
     ];
     if connecting {
-        p.footer(&[], Some((if fr { "Connexion au lecteur..." } else { "Connecting..." }, false)));
+        p.footer(&[], Some((loc!(lang, fr: "Connexion au lecteur...", en: "Connecting...", ja: "リーダーに接続中...", zh: "正在连接读卡器..."), false)));
     } else {
         p.footer(hints, banner);
     }
@@ -115,7 +126,6 @@ pub fn render_readers(p: &mut Painter, lang: Lang, system: System, rows: &[Reade
 
 /// A screen for something planned but not implemented yet.
 pub fn render_placeholder(p: &mut Painter, lang: Lang, system: System, lines: &[&str]) {
-    let fr = lang == Lang::Fr;
     p.canvas.fill_rect(0, 0, SCREEN_W, SCREEN_H, BACKGROUND);
     p.frame();
     p.bar("ZEROCART", system.label(), None);
@@ -125,7 +135,7 @@ pub fn render_placeholder(p: &mut Painter, lang: Lang, system: System, lines: &[
         p.text(l, if i == 0 { 12 } else { 10 }, i == 0, if i == 0 { TEXT } else { DIM }, 92, y, Some(SCREEN_W - 104));
         y += if i == 0 { 20 } else { 15 };
     }
-    p.footer(&[("Esc", if fr { "retour" } else { "back" })], None);
+    p.footer(&[("Esc", loc::word::back(lang))], None);
 }
 
 #[cfg(test)]

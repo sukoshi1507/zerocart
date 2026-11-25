@@ -26,6 +26,14 @@ read back and compared. The system chosen on the first screen sets the mode and 
 Not handled yet: other Game Boy mappers, flash chips with buffered writes or other command sets (they are refused,
 not guessed), GBxCart-specific firmware features, the e-Reader and the Pocket Camera.
 
+## Languages
+
+The interface is available in French, English, Japanese and Simplified Chinese. The first start follows the system's `LANG`
+(French if it is none of these), `L` on the system screen changes it, and `--lang fr|en|ja|zh` forces it for one run.
+Japanese and Chinese use the system's Noto Sans CJK font (the package depends on `fonts-noto-cjk`). Every text lives
+next to the code that shows it, written once per language with the `loc!` macro, so the compiler refuses a text that
+lacks a language; the worker's messages are in `crates/zerocart-app/src/msg.rs`.
+
 ## Using it
 
 Start **ZeroCart** from the APPLaunch menu. Put the ROMs (`.gb`, `.gbc`, `.gba`) and saves (`.sav`) you want to write
@@ -36,6 +44,7 @@ in `~/zerocart`; dumps are written there too.
 | `Z` / `C` (or Fn + arrows) | left / right: choose the system, change tab |
 | `F` / `X` (or Fn + arrows) | up / down: choose a reader, an action, a file |
 | Enter | confirm the choice, run |
+| `L` (on the system screen) | next language: Français, English, 日本語, 简体中文 (remembered in `~/.config/zerocart/lang`) |
 | `R` | read the cartridge again (after swapping it) |
 | `Y` | confirm a write |
 | Esc | cancel (only before the writing starts), quit |

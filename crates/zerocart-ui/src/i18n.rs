@@ -23,6 +23,25 @@ impl Lang {
         }
     }
 
+    /// Position in the cycle of [`Lang::next`] (for sharing the choice between threads as a number).
+    pub fn index(self) -> u8 {
+        match self {
+            Lang::Fr => 0,
+            Lang::En => 1,
+            Lang::Ja => 2,
+            Lang::Zh => 3,
+        }
+    }
+
+    pub fn from_index(i: u8) -> Lang {
+        match i {
+            1 => Lang::En,
+            2 => Lang::Ja,
+            3 => Lang::Zh,
+            _ => Lang::Fr,
+        }
+    }
+
     pub fn code(self) -> &'static str {
         match self {
             Lang::Fr => "fr",
