@@ -1,7 +1,11 @@
 //! Application state: tabs, selection, running transfer. Keys in, commands out (to the worker), events in.
+use crate::readers::{self, Detected};
 use crate::worker::{Cmd, Event};
-use zerocart_ui::{Action, CartView, Overlay, ProgressView, ReaderView, Tab, View};
+use zerocart_core::ReaderKind;
+use zerocart_ui::screens::ReaderRow;
+use zerocart_ui::{Action, CartView, Overlay, ProgressView, ReaderView, System, Tab, View};
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::Arc;
@@ -15,7 +19,35 @@ enum Flow {
     Confirming { action: Action, file: PathBuf },
 }
 
+/// Where the user is: the start screens, then the tabs of the chosen system.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stage {
+    Splash,
+    /// The four icons: Game Boy, Game Boy Color, Game Boy Advance, Mega Drive
+    System,
+    /// The readers that can take that system, with a live "plugged in" check
+    Readers,
+    /// Cartridge / Actions / Tools
+    Main,
+    /// A system whose support is planned but not implemented
+    Placeholder,
+}
+
+const SPLASH_TIME: Duration = Duration::from_millis(1600);
+const SCAN_EVERY: Duration = Duration::from_millis(600);
+
 pub struct App {
+    pub stage: Stage,
+    pub system: System,
+    system_sel: usize,
+    reader_sel: usize,
+    /// The user moved the highlight: the scan no longer moves it to the plugged-in reader.
+    reader_moved: bool,
+    detected: Vec<Detected>,
+    connecting: bool,
+    splash_since: Option<Instant>,
+    last_scan: Option<Instant>,
+    scanner: Box<dyn FnMut() -> Vec<Detected>>,
     pub lang: Lang,
     pub tab: Tab,
     pub action_sel: usize,
@@ -37,20 +69,174 @@ pub struct App {
     analysis: Option<Vec<String>>,
     analysis_scroll: usize,
     analysing: bool,
-    /// The mode of the last detection (Game Boy or GBA), to say what to try when no cartridge is found.
-    last_dmg: bool,
 }
 
 impl App {
     pub fn new(lang: Lang, tx: Sender<Cmd>, cancel: Arc<AtomicBool>, out_dir: PathBuf) -> Self {
-        let mut a = Self {
+        Self {
+            stage: Stage::Splash, system: System::Gb, system_sel: 0, reader_sel: 0, reader_moved: false, detected: Vec::new(), connecting: false,
+            splash_since: None, last_scan: None, scanner: Box::new(readers::scan),
             lang, tab: Tab::Info, action_sel: 0, reader: None, cart: None, scanning: false, progress: None,
             banner: None, want_quit: false, dirty: true, tx, cancel, out_dir, flow: Flow::None,
             picker_items: Vec::new(), confirm_lines: Vec::new(), flow_gba: false,
-            analysis: None, analysis_scroll: 0, analysing: false, last_dmg: false,
-        };
-        a.detect(false);
-        a
+            analysis: None, analysis_scroll: 0, analysing: false,
+        }
+    }
+
+    /// Replaces the USB scan (tests).
+    #[cfg(test)]
+    pub fn with_scanner(mut self, f: impl FnMut() -> Vec<Detected> + 'static) -> Self {
+        self.scanner = Box::new(f);
+        self
+    }
+
+    /// Skips the start screens: the reader is connected and the cartridge of `system` read, as when the user has
+    /// chosen them (used by the `--reader` / `--system` options).
+    pub fn start_with(&mut self, kind: ReaderKind, system: System) {
+        self.system = system;
+        self.system_sel = System::ALL.iter().position(|&s| s == system).unwrap_or(0);
+        self.stage = Stage::Readers;
+        self.connect(kind);
+    }
+
+    /// Goes to the tabs of `system` and reads the cartridge (the reader is already connected).
+    pub fn enter_main(&mut self, system: System) {
+        self.system = system;
+        self.stage = Stage::Main;
+        self.tab = Tab::Info;
+        self.detect(self.dmg());
+    }
+
+    /// Game Boy and Game Boy Color are read in Game Boy mode (5 V), the Advance in GBA mode (3.3 V).
+    fn dmg(&self) -> bool {
+        self.system != System::Gba
+    }
+
+    fn connect(&mut self, kind: ReaderKind) {
+        self.connecting = true;
+        self.banner = None;
+        let _ = self.tx.send(Cmd::Connect(kind));
+        self.dirty = true;
+    }
+
+    /// Called every loop turn: ends the splash, and refreshes the "plugged in" check while the readers are shown.
+    pub fn tick(&mut self, now: Instant) {
+        match self.stage {
+            Stage::Splash => {
+                let since = *self.splash_since.get_or_insert(now);
+                if now.duration_since(since) >= SPLASH_TIME {
+                    self.stage = Stage::System;
+                    self.dirty = true;
+                }
+            }
+            Stage::Readers if !self.connecting => {
+                if self.last_scan.is_none_or(|t| now.duration_since(t) >= SCAN_EVERY) {
+                    self.last_scan = Some(now);
+                    let found = (self.scanner)();
+                    if found != self.detected {
+                        self.detected = found;
+                        if !self.reader_moved {
+                            self.reader_sel = self.first_plugged();
+                        }
+                        self.dirty = true;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn reader_kinds(&self) -> Vec<ReaderKind> {
+        readers::compatible(self.system)
+    }
+
+    fn is_plugged(&self, kind: ReaderKind) -> bool {
+        self.detected.iter().any(|d| d.kind == kind)
+    }
+
+    /// The first plugged-in reader of the list, the one to highlight.
+    fn first_plugged(&self) -> usize {
+        self.reader_kinds().iter().position(|&k| self.is_plugged(k)).unwrap_or(0)
+    }
+
+    fn rows(&self) -> Vec<ReaderRow> {
+        self.reader_kinds()
+            .into_iter()
+            .map(|k| {
+                let found = self.detected.iter().find(|d| d.kind == k);
+                ReaderRow {
+                    name: k.label().to_string(),
+                    detail: found.map_or_else(|| readers::usb_hint(k).to_string(), |d| d.port.clone()),
+                    present: found.is_some(),
+                }
+            })
+            .collect()
+    }
+
+    /// Back one level: tabs -> readers -> systems -> quit.
+    fn back(&mut self) {
+        match self.stage {
+            Stage::Main | Stage::Placeholder => {
+                let _ = self.tx.send(Cmd::Disconnect);
+                self.reader = None;
+                self.cart = None;
+                self.analysis = None;
+                self.banner = None;
+                self.stage = Stage::Readers;
+                self.connecting = false;
+                self.last_scan = None; // look again at once
+                self.reader_moved = false;
+                self.reader_sel = self.first_plugged();
+            }
+            Stage::Readers => {
+                self.banner = None;
+                self.stage = Stage::System;
+            }
+            Stage::System => self.want_quit = true,
+            Stage::Splash => self.stage = Stage::System,
+        }
+    }
+
+    fn start_key(&mut self, key: Key) {
+        match (self.stage, key) {
+            (Stage::Splash, _) => self.stage = Stage::System,
+            (Stage::System, Key::Left) => self.system_sel = (self.system_sel + System::ALL.len() - 1) % System::ALL.len(),
+            (Stage::System, Key::Right | Key::Tab) => self.system_sel = (self.system_sel + 1) % System::ALL.len(),
+            (Stage::System, Key::Enter) => {
+                self.system = System::ALL[self.system_sel];
+                self.stage = Stage::Readers;
+                self.detected.clear();
+                self.last_scan = None;
+                self.reader_sel = 0;
+                self.reader_moved = false;
+                self.banner = None;
+            }
+            (Stage::System, Key::Esc) | (Stage::Readers, Key::Esc) | (Stage::Placeholder, Key::Esc) => self.back(),
+            (Stage::Readers, Key::Up) | (Stage::Readers, Key::Down) if !self.connecting => {
+                let n = self.reader_kinds().len().max(1);
+                self.reader_moved = true;
+                self.reader_sel = if key == Key::Up { (self.reader_sel + n - 1) % n } else { (self.reader_sel + 1) % n };
+            }
+            (Stage::Readers, Key::Enter) if !self.connecting => {
+                let kinds = self.reader_kinds();
+                let Some(&kind) = kinds.get(self.reader_sel) else { return };
+                if self.is_plugged(kind) {
+                    self.connect(kind);
+                } else {
+                    let name = kind.label();
+                    self.banner = Some((
+                        if self.fr() { format!("{name} : non branché") } else { format!("{name}: not plugged in") },
+                        true,
+                    ));
+                }
+            }
+            _ => self.dirty = false,
+        }
+    }
+
+    /// A command is running in the worker: scripted keys wait.
+    pub fn busy(&self) -> bool {
+        self.scanning || self.connecting
     }
 
     fn fr(&self) -> bool {
@@ -58,7 +244,6 @@ impl App {
     }
 
     fn detect(&mut self, dmg: bool) {
-        self.last_dmg = dmg;
         self.scanning = true;
         self.cart = None;
         self.banner = None;
@@ -73,6 +258,10 @@ impl App {
     pub fn on_routed(&mut self, r: Routed) {
         let Routed::Down(key) = r else { return };
         self.dirty = true;
+        if self.stage != Stage::Main {
+            self.start_key(key);
+            return;
+        }
         if !matches!(self.flow, Flow::None) {
             self.flow_key(key);
             return;
@@ -84,24 +273,10 @@ impl App {
             return;
         }
         match key {
-            Key::Esc => self.want_quit = true,
+            Key::Esc => self.back(),
             Key::Right | Key::Tab => self.tab = self.tab.next(),
             Key::Left => self.tab = self.tab.prev(),
-            Key::Char('r') | Key::Char('R') if !self.scanning => self.detect(false),
-            Key::Char('g') | Key::Char('G') if !self.scanning => {
-                let no_voltage = self.reader.as_ref().is_some_and(|r| r.voltage.is_empty());
-                self.detect(true);
-                self.banner = Some((
-                    match (no_voltage, self.fr()) {
-                        (true, true) => "Lecture en mode Game Boy",
-                        (true, false) => "Reading in Game Boy mode",
-                        (false, true) => "Mode Game Boy : 5 V sur la cartouche",
-                        (false, false) => "Game Boy mode: 5 V on the cartridge",
-                    }
-                    .into(),
-                    false,
-                ));
-            }
+            Key::Char('r') | Key::Char('R') if !self.scanning => self.detect(self.dmg()),
             Key::Up if self.tab == Tab::Actions => self.action_sel = (self.action_sel + Action::ALL.len() - 1) % Action::ALL.len(),
             Key::Down if self.tab == Tab::Actions => self.action_sel = (self.action_sel + 1) % Action::ALL.len(),
             Key::Enter if self.tab == Tab::Actions => self.run_action(),
@@ -210,11 +385,11 @@ impl App {
                     // reverse) has no valid header. Say what to try instead of waiting silently.
                     let fr = self.fr();
                     self.banner = Some((
-                        match (self.last_dmg, fr) {
-                            (false, true) => "Pas de cartouche GBA : une Game Boy ? (G)",
-                            (false, false) => "No GBA cartridge: a Game Boy one? (G)",
-                            (true, true) => "Pas de cartouche Game Boy : une GBA ? (R)",
-                            (true, false) => "No Game Boy cartridge: a GBA one? (R)",
+                        match (self.dmg(), fr) {
+                            (false, true) => "Pas de cartouche GBA : est-ce une Game Boy ? (Échap : changer)",
+                            (false, false) => "No GBA cartridge: is it a Game Boy one? (Esc: change)",
+                            (true, true) => "Pas de cartouche Game Boy : est-ce une GBA ? (Échap : changer)",
+                            (true, false) => "No Game Boy cartridge: is it a GBA one? (Esc: change)",
                         }
                         .into(),
                         true,
@@ -222,6 +397,19 @@ impl App {
                 }
                 self.cart = cart;
                 self.analysis = None; // it described the previous cartridge or mode
+            }
+            Event::Connected(Ok(view)) => {
+                self.connecting = false;
+                self.reader = Some(view);
+                if self.system == System::MegaDrive {
+                    self.stage = Stage::Placeholder;
+                } else {
+                    self.enter_main(self.system);
+                }
+            }
+            Event::Connected(Err(msg)) => {
+                self.connecting = false;
+                self.banner = Some((msg, true));
             }
             Event::Analysis(r) => {
                 self.analysing = false;
@@ -246,6 +434,27 @@ impl App {
                     Ok(m) => (m, false),
                     Err(m) => (m, true),
                 });
+            }
+        }
+    }
+
+    /// Draws the current screen.
+    pub fn render(&self, p: &mut zerocart_ui::widgets::Painter) {
+        use zerocart_ui::screens;
+        let banner = self.banner.as_ref().map(|(m, e)| (m.as_str(), *e));
+        match self.stage {
+            Stage::Splash => screens::render_splash(p, self.lang, env!("CARGO_PKG_VERSION")),
+            Stage::System => screens::render_system(p, self.lang, self.system_sel, banner),
+            Stage::Readers => screens::render_readers(p, self.lang, self.system, &self.rows(), self.reader_sel, self.connecting, banner),
+            Stage::Main => zerocart_ui::render(p, &self.view()),
+            Stage::Placeholder => {
+                let fr = self.fr();
+                let lines: [&str; 3] = if fr {
+                    ["Mega Drive : bientôt dans l'application", "Le lecteur Krikzz répond.", "Utilisez zerocart-md en ligne de commande."]
+                } else {
+                    ["Mega Drive: coming soon in the app", "The Krikzz reader answers.", "Use zerocart-md on the command line."]
+                };
+                screens::render_placeholder(p, self.lang, self.system, &lines);
             }
         }
     }
@@ -282,9 +491,24 @@ mod tests {
     use super::*;
     use std::sync::mpsc::{channel, Receiver};
 
+    /// An application already in the tabs of the GBA system (one `Detect` waits in the channel).
     fn app() -> (App, Receiver<Cmd>) {
         let (tx, rx) = channel();
-        (App::new(Lang::Fr, tx, Arc::new(AtomicBool::new(false)), std::env::temp_dir().join("zerocart-test-none")), rx)
+        let mut a = App::new(Lang::Fr, tx, Arc::new(AtomicBool::new(false)), std::env::temp_dir().join("zerocart-test-none"));
+        a.enter_main(System::Gba);
+        (a, rx)
+    }
+
+    /// An application at the very start, with a scripted USB scan.
+    fn fresh(found: Vec<Detected>) -> (App, Receiver<Cmd>) {
+        let (tx, rx) = channel();
+        let a = App::new(Lang::Fr, tx, Arc::new(AtomicBool::new(false)), std::env::temp_dir().join("zerocart-test-none"))
+            .with_scanner(move || found.clone());
+        (a, rx)
+    }
+
+    fn plugged(kind: ReaderKind) -> Detected {
+        Detected { kind, port: "/dev/ttyTEST".into() }
     }
     fn cart() -> CartView {
         CartView { system: "GBA", title: "T".into(), code: "AGB-TEST".into(), rom: "4 MiB".into(), save: "SRAM".into(), database: None, header_ok: true }
@@ -294,23 +518,6 @@ mod tests {
     }
     fn down(a: &mut App, k: Key) {
         a.on_routed(Routed::Down(k));
-    }
-
-    #[test]
-    fn starts_by_scanning_in_the_safe_gba_mode() {
-        let (a, rx) = app();
-        assert!(a.scanning);
-        assert!(matches!(rx.try_recv().unwrap(), Cmd::Detect { dmg: false }));
-    }
-
-    #[test]
-    fn game_boy_5v_mode_only_on_an_explicit_key() {
-        let (mut a, rx) = app();
-        rx.try_recv().unwrap();
-        a.on_event(Event::Detected(Ok((reader(), Some(cart())))));
-        assert!(rx.try_recv().is_err());
-        down(&mut a, Key::Char('g'));
-        assert!(matches!(rx.try_recv().unwrap(), Cmd::Detect { dmg: true }));
     }
 
     #[test]
@@ -340,36 +547,219 @@ mod tests {
     }
 
     #[test]
-    fn no_cartridge_says_which_mode_to_try_instead_of_waiting_silently() {
-        let (mut a, _rx) = app();
-        // the application starts in GBA mode
-        a.on_event(Event::Detected(Ok((reader(), None))));
-        assert_eq!(a.banner, Some(("Pas de cartouche GBA : une Game Boy ? (G)".into(), true)));
-        down(&mut a, Key::Char('g'));
-        a.on_event(Event::Detected(Ok((reader(), None))));
-        assert_eq!(a.banner, Some(("Pas de cartouche Game Boy : une GBA ? (R)".into(), true)));
-        // a cartridge found clears the message
-        a.on_event(Event::Detected(Ok((reader(), Some(cart())))));
-        assert!(a.cart.is_some());
-        assert!(a.banner.is_none());
+    fn the_tabs_read_the_cartridge_in_the_mode_the_system_implies() {
+        let (_a, rx) = app(); // Game Boy Advance
+        assert!(matches!(rx.try_recv().unwrap(), Cmd::Detect { dmg: false }), "GBA is read at 3.3 V");
+        for system in [System::Gb, System::Gbc] {
+            let (tx, rx) = channel();
+            let mut a = App::new(Lang::Fr, tx, Arc::new(AtomicBool::new(false)), std::env::temp_dir());
+            a.enter_main(system);
+            assert!(matches!(rx.try_recv().unwrap(), Cmd::Detect { dmg: true }), "{system:?} is read at 5 V");
+        }
     }
 
     #[test]
-    fn the_game_boy_mode_banner_has_no_voltage_for_a_reader_that_does_not_set_one() {
-        let (mut a, _rx) = app();
-        let chis = ReaderView { name: "Chisflash".into(), firmware: String::new(), voltage: "" };
-        a.on_event(Event::Detected(Ok((chis, Some(cart())))));
+    fn there_is_no_key_to_switch_the_mode_any_more() {
+        let (mut a, rx) = app();
+        rx.try_recv().unwrap();
+        a.on_event(Event::Detected(Ok((reader(), Some(cart())))));
         down(&mut a, Key::Char('g'));
-        assert_eq!(a.banner, Some(("Lecture en mode Game Boy".into(), false)));
-        let (mut b, _rx) = app();
+        down(&mut a, Key::Char('G'));
+        assert!(rx.try_recv().is_err(), "G does nothing: the system was chosen at the start");
+        down(&mut a, Key::Char('r'));
+        assert!(matches!(rx.try_recv().unwrap(), Cmd::Detect { dmg: false }), "R reads the cartridge again, same mode");
+    }
+
+    #[test]
+    fn no_cartridge_says_what_to_check_instead_of_waiting_silently() {
+        let (mut a, _rx) = app(); // GBA
+        a.on_event(Event::Detected(Ok((reader(), None))));
+        assert_eq!(a.banner, Some(("Pas de cartouche GBA : est-ce une Game Boy ? (Échap : changer)".into(), true)));
+        let (tx, _rx2) = channel();
+        let mut b = App::new(Lang::Fr, tx, Arc::new(AtomicBool::new(false)), std::env::temp_dir());
+        b.enter_main(System::Gb);
+        b.on_event(Event::Detected(Ok((reader(), None))));
+        assert_eq!(b.banner, Some(("Pas de cartouche Game Boy : est-ce une GBA ? (Échap : changer)".into(), true)));
+        // a cartridge found clears the message
         b.on_event(Event::Detected(Ok((reader(), Some(cart())))));
-        down(&mut b, Key::Char('g'));
-        assert_eq!(b.banner, Some(("Mode Game Boy : 5 V sur la cartouche".into(), false)));
+        assert!(b.cart.is_some() && b.banner.is_none());
+    }
+
+    #[test]
+    fn the_splash_ends_by_itself_or_on_any_key() {
+        let (mut a, _rx) = fresh(vec![]);
+        assert_eq!(a.stage, Stage::Splash);
+        let t0 = Instant::now();
+        a.tick(t0);
+        assert_eq!(a.stage, Stage::Splash);
+        a.tick(t0 + Duration::from_millis(1000));
+        assert_eq!(a.stage, Stage::Splash, "not yet");
+        a.tick(t0 + SPLASH_TIME);
+        assert_eq!(a.stage, Stage::System);
+        let (mut b, _rx) = fresh(vec![]);
+        down(&mut b, Key::Char('x'));
+        assert_eq!(b.stage, Stage::System, "a key skips the splash");
+    }
+
+    #[test]
+    fn the_four_icons_are_chosen_with_the_arrows_and_enter() {
+        let (mut a, _rx) = fresh(vec![]);
+        down(&mut a, Key::Enter); // skips the splash
+        assert_eq!(a.stage, Stage::System);
+        down(&mut a, Key::Right);
+        down(&mut a, Key::Right);
+        down(&mut a, Key::Enter);
+        assert_eq!((a.stage, a.system), (Stage::Readers, System::Gba), "third icon");
+        down(&mut a, Key::Esc);
+        assert_eq!(a.stage, Stage::System);
+        down(&mut a, Key::Left); // third icon -> second -> first -> wraps to the fourth
+        down(&mut a, Key::Left);
+        down(&mut a, Key::Left);
+        down(&mut a, Key::Enter);
+        assert_eq!(a.system, System::MegaDrive, "three steps left from the third icon wrap around to the fourth");
+        down(&mut a, Key::Esc);
+        down(&mut a, Key::Esc);
+        assert!(a.want_quit, "Esc on the first screen quits");
+    }
+
+    #[test]
+    fn the_readers_shown_depend_on_the_system_and_follow_the_usb_scan() {
+        let (mut a, _rx) = fresh(vec![plugged(ReaderKind::Chisflash)]);
+        down(&mut a, Key::Enter);
+        down(&mut a, Key::Enter); // Game Boy
+        assert!(a.rows().iter().all(|r| !r.present), "nothing is known before the first scan");
+        a.tick(Instant::now());
+        let rows = a.rows();
+        assert_eq!(rows.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(), ["GBxCart RW / GBFlash", "Chisflash"]);
+        assert_eq!(rows.iter().map(|r| r.present).collect::<Vec<_>>(), [false, true]);
+        assert_eq!(a.reader_sel, 1, "the highlight goes to the reader that is plugged in");
+        assert_eq!(rows[1].detail, "/dev/ttyTEST");
+        assert_eq!(rows[0].detail, "USB 1a86:7523", "a reader that is not plugged in shows where to plug it");
+        // Mega Drive: only the Krikzz programmer
+        down(&mut a, Key::Esc);
+        down(&mut a, Key::Right);
+        down(&mut a, Key::Right);
+        down(&mut a, Key::Right);
+        down(&mut a, Key::Enter);
+        assert_eq!(a.rows().iter().map(|r| r.name.as_str()).collect::<Vec<_>>(), ["Krikzz Mega Drive"]);
+    }
+
+    #[test]
+    fn the_scan_is_repeated_and_a_reader_plugged_in_later_appears() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+        let state: Rc<RefCell<Vec<Detected>>> = Rc::default();
+        let s2 = state.clone();
+        let (tx, _rx) = channel();
+        let mut a = App::new(Lang::Fr, tx, Arc::new(AtomicBool::new(false)), std::env::temp_dir()).with_scanner(move || s2.borrow().clone());
+        down(&mut a, Key::Enter);
+        down(&mut a, Key::Enter);
+        let t0 = Instant::now();
+        a.tick(t0);
+        assert!(a.rows().iter().all(|r| !r.present));
+        *state.borrow_mut() = vec![plugged(ReaderKind::GbxCart)];
+        a.tick(t0 + Duration::from_millis(100));
+        assert!(a.rows().iter().all(|r| !r.present), "not rescanned yet");
+        a.tick(t0 + SCAN_EVERY);
+        assert!(a.rows()[0].present);
+        assert!(a.take_dirty(), "the screen is redrawn when the scan changes");
+    }
+
+    #[test]
+    fn confirming_a_plugged_reader_connects_and_an_absent_one_is_refused() {
+        let (mut a, rx) = fresh(vec![plugged(ReaderKind::Chisflash)]);
+        down(&mut a, Key::Enter);
+        down(&mut a, Key::Right);
+        down(&mut a, Key::Right);
+        down(&mut a, Key::Enter); // GBA
+        a.tick(Instant::now());
+        down(&mut a, Key::Up); // the user moves back to the first row, the GBFlash, which is not plugged in
+        down(&mut a, Key::Enter);
+        assert!(rx.try_recv().is_err(), "nothing is sent for a reader that is not there");
+        assert_eq!(a.banner, Some(("GBxCart RW / GBFlash : non branché".into(), true)));
+        down(&mut a, Key::Down);
+        down(&mut a, Key::Enter);
+        assert!(matches!(rx.try_recv().unwrap(), Cmd::Connect(ReaderKind::Chisflash)));
+        assert!(a.busy());
+        // the answer leads to the tabs, which start by reading the cartridge in the system's mode
+        a.on_event(Event::Connected(Ok(ReaderView { name: "Chisflash".into(), firmware: String::new(), voltage: "" })));
+        assert_eq!(a.stage, Stage::Main);
+        assert!(matches!(rx.try_recv().unwrap(), Cmd::Detect { dmg: false }));
+    }
+
+    #[test]
+    fn a_reader_that_does_not_answer_stays_on_the_reader_screen_with_the_reason() {
+        let (mut a, rx) = fresh(vec![plugged(ReaderKind::GbxCart)]);
+        down(&mut a, Key::Enter);
+        down(&mut a, Key::Enter);
+        a.tick(Instant::now());
+        down(&mut a, Key::Enter);
+        rx.try_recv().unwrap();
+        a.on_event(Event::Connected(Err("le lecteur ne répond pas".into())));
+        assert_eq!(a.stage, Stage::Readers);
+        assert!(!a.busy());
+        assert_eq!(a.banner, Some(("le lecteur ne répond pas".into(), true)));
+    }
+
+    #[test]
+    fn escape_in_the_tabs_goes_back_to_the_readers_and_disconnects() {
+        let (mut a, rx) = app();
+        rx.try_recv().unwrap();
+        a.on_event(Event::Detected(Ok((reader(), Some(cart())))));
+        down(&mut a, Key::Esc);
+        assert!(matches!(rx.try_recv().unwrap(), Cmd::Disconnect));
+        assert_eq!(a.stage, Stage::Readers);
+        assert!(a.cart.is_none() && a.reader.is_none() && !a.want_quit);
+        down(&mut a, Key::Esc);
+        assert_eq!(a.stage, Stage::System);
+    }
+
+    #[test]
+    fn escape_still_cancels_a_transfer_and_does_not_leave_the_tabs() {
+        let (mut a, rx) = app();
+        rx.try_recv().unwrap();
+        a.on_event(Event::Detected(Ok((reader(), Some(cart())))));
+        down(&mut a, Key::Right);
+        down(&mut a, Key::Enter);
+        rx.try_recv().unwrap();
+        down(&mut a, Key::Esc);
+        assert!(a.cancel.load(Ordering::SeqCst));
+        assert_eq!(a.stage, Stage::Main);
+    }
+
+    #[test]
+    fn the_mega_drive_reaches_a_placeholder_after_the_handshake() {
+        let (mut a, rx) = fresh(vec![plugged(ReaderKind::KrikzzMd)]);
+        down(&mut a, Key::Enter);
+        for _ in 0..3 {
+            down(&mut a, Key::Right);
+        }
+        down(&mut a, Key::Enter);
+        a.tick(Instant::now());
+        down(&mut a, Key::Enter);
+        assert!(matches!(rx.try_recv().unwrap(), Cmd::Connect(ReaderKind::KrikzzMd)));
+        a.on_event(Event::Connected(Ok(ReaderView { name: "Krikzz FlashKit MD".into(), firmware: String::new(), voltage: "" })));
+        assert_eq!(a.stage, Stage::Placeholder);
+        assert!(rx.try_recv().is_err(), "no cartridge is read for a system that is not implemented");
+        down(&mut a, Key::Esc);
+        assert!(matches!(rx.try_recv().unwrap(), Cmd::Disconnect));
+        assert_eq!(a.stage, Stage::Readers);
+    }
+
+    #[test]
+    fn start_with_skips_the_start_screens() {
+        let (mut a, rx) = fresh(vec![]);
+        a.start_with(ReaderKind::GbxCart, System::Gbc);
+        assert!(matches!(rx.try_recv().unwrap(), Cmd::Connect(ReaderKind::GbxCart)));
+        a.on_event(Event::Connected(Ok(reader())));
+        assert_eq!((a.stage, a.system), (Stage::Main, System::Gbc));
+        assert!(matches!(rx.try_recv().unwrap(), Cmd::Detect { dmg: true }));
     }
 
     fn app_in(dir: &std::path::Path) -> (App, Receiver<Cmd>) {
         let (tx, rx) = channel();
         let mut a = App::new(Lang::Fr, tx, Arc::new(AtomicBool::new(false)), dir.to_path_buf());
+        a.enter_main(System::Gb);
         rx.try_recv().unwrap();
         a.on_event(Event::Detected(Ok((reader(), Some(CartView { system: "GB/GBC", ..cart() })))));
         a.tab = Tab::Actions;
@@ -508,9 +898,15 @@ mod tests {
     }
 
     #[test]
-    fn escape_quits_when_idle() {
+    fn escape_walks_back_up_the_screens_and_only_quits_from_the_first_one() {
         let (mut a, _rx) = app();
         a.on_event(Event::Detected(Err("lecteur non trouvé".into())));
+        down(&mut a, Key::Esc);
+        assert_eq!(a.stage, Stage::Readers);
+        assert!(!a.want_quit);
+        down(&mut a, Key::Esc);
+        assert_eq!(a.stage, Stage::System);
+        assert!(!a.want_quit);
         down(&mut a, Key::Esc);
         assert!(a.want_quit);
     }

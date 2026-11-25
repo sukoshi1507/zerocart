@@ -107,3 +107,16 @@ avant de copier des tables ou des constantes, sinon réécrire depuis la descrip
    qu'il sait lire (GBFlash : GB, GBA ; Chisflash : GB, GBA ; Krikzz : Mega Drive), au lieu de deux modes codés en dur.
 6. **Où l'héberger** : la décision « trois projets indépendants » est à reconfirmer avec l'utilisateur. Un lecteur de
    cartouches série est de même nature que ZeroCart ; le seul écart est la licence si du code Krikzz non MIT était repris.
+
+## Avancement de la refonte (jalon 1, 2026-11-25)
+
+Fait : écran de démarrage (logo) -> choix du système par 4 icônes pixel-art (Game Boy, Game Boy Color, Game Boy
+Advance, Mega Drive) -> choix du lecteur compatible avec détection de présence en direct par identifiants USB
+(GBFlash 1a86:7523, Chisflash 0483:0721, Krikzz 0403:6001), confirmée par une vraie poignée de main quand on valide ->
+écrans actuels (Cartouche / Actions / Outils). Le système fixe le mode et la tension (GB et GBC : 5 V, GBA : 3,3 V) :
+plus de touches R/G. `Échap` remonte d'un niveau (onglets -> lecteurs -> systèmes -> quitter). Le Mega Drive aboutit à
+un écran « bientôt » après la poignée de main du Krikzz.
+Options de test : `zerocart-app --reader gbx|chis|krikzz --system gb|gbc|gba|md` saute les écrans de démarrage ;
+`--png X --screen splash|system|readers|readers-none|placeholder` rend un écran sans l'appareil.
+Reste : brancher la lecture / le flash du Mega Drive dans l'application (API krikzz.rs), les rendus à affiner avec
+l'utilisateur (icônes, textes, anglais), essais avec le GBFlash.

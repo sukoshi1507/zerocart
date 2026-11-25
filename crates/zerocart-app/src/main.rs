@@ -3,6 +3,7 @@
 //! `--png` renders a demo frame to a file and exits (no display, no reader): used to check the screens.
 mod app;
 mod fb;
+mod readers;
 mod input;
 mod screenshot;
 mod worker;
@@ -68,6 +69,31 @@ fn demo_png(args: &[String], out: &str, lang: Lang, fonts: &Fonts) -> Result<(),
     });
     let mut canvas = Canvas::new(SCREEN_W, SCREEN_H, 0);
     let mut p = Painter { canvas: &mut canvas, fonts };
+    // the start screens
+    {
+        use zerocart_ui::screens::{self, ReaderRow};
+        use zerocart_ui::System;
+        let sel: usize = arg(args, "--select").and_then(|s| s.parse().ok()).unwrap_or(0);
+        let rows = vec![
+            ReaderRow { name: "GBxCart RW / GBFlash".into(), detail: "/dev/ttyUSB0".into(), present: true },
+            ReaderRow { name: "Chisflash".into(), detail: "USB 0483:0721".into(), present: false },
+        ];
+        let done = match arg(args, "--screen").as_deref() {
+            Some("splash") => { screens::render_splash(&mut p, lang, env!("CARGO_PKG_VERSION")); true }
+            Some("system") => { screens::render_system(&mut p, lang, sel, None); true }
+            Some("readers") => { screens::render_readers(&mut p, lang, System::Gba, &rows, sel, false, None); true }
+            Some("readers-none") => { screens::render_readers(&mut p, lang, System::Gb, &[rows[0].clone_absent(), rows[1].clone_absent()], 0, false, None); true }
+            Some("placeholder") => {
+                screens::render_placeholder(&mut p, lang, System::MegaDrive, &["Mega Drive : bientôt dans l'application", "Le lecteur Krikzz répond.", "Utilisez zerocart-md en ligne de commande."]);
+                true
+            }
+            _ => false,
+        };
+        if done {
+            return screenshot::write_png(std::path::Path::new(out), &canvas.to_rgba(), SCREEN_W as u32, SCREEN_H as u32)
+                .map_err(|e| e.to_string());
+        }
+    }
     let items = vec!["REPUGNANTBOUNTY.gb  (4096 Ko)".to_string(), "Mr. Driller 2.gb  (4096 Ko)".to_string(), "test.gbc  (1024 Ko)".to_string()];
     let lines = vec![
         "ATTENTION : la ROM de la cartouche va être effacée".to_string(),
@@ -140,6 +166,29 @@ fn main() {
     };
     let handle = std::thread::spawn(move || worker.run(cmd_rx, ev_tx));
     let mut app = App::new(lang, cmd_tx.clone(), cancel, out_dir);
+    // Test aid: `--reader gbx|chis|krikzz --system gb|gbc|gba|md` skips the start screens.
+    if let (Some(r), Some(sy)) = (arg(&args, "--reader"), arg(&args, "--system")) {
+        let kind = match r.as_str() {
+            "gbx" | "gbflash" => zerocart_core::ReaderKind::GbxCart,
+            "chis" | "chisflash" => zerocart_core::ReaderKind::Chisflash,
+            "krikzz" | "md" => zerocart_core::ReaderKind::KrikzzMd,
+            other => {
+                eprintln!("zerocart: unknown --reader '{other}' (gbx, chis, krikzz)");
+                std::process::exit(2);
+            }
+        };
+        let system = match sy.as_str() {
+            "gb" => zerocart_ui::System::Gb,
+            "gbc" => zerocart_ui::System::Gbc,
+            "gba" => zerocart_ui::System::Gba,
+            "md" => zerocart_ui::System::MegaDrive,
+            other => {
+                eprintln!("zerocart: unknown --system '{other}' (gb, gbc, gba, md)");
+                std::process::exit(2);
+            }
+        };
+        app.start_with(kind, system);
+    }
     let mut keypads = Keypad::discover();
     let mut router = KeyRouter::default();
     let mut canvas = Canvas::new(SCREEN_W, SCREEN_H, 0);
@@ -153,7 +202,8 @@ fn main() {
     let mut transfer_seen = false;
     while !app.want_quit {
         let now = Instant::now();
-        if !app.scanning && !script.is_empty() {
+        app.tick(now);
+        if !app.busy() && !script.is_empty() {
             let k = script.pop().unwrap();
             app.on_routed(input::Routed::Down(k));
         }
@@ -176,7 +226,7 @@ fn main() {
         }
         if app.take_dirty() {
             let mut p = Painter { canvas: &mut canvas, fonts: &fonts };
-            zerocart_ui::render(&mut p, &app.view());
+            app.render(&mut p);
             if let Err(e) = framebuffer.present(&canvas) {
                 eprintln!("zerocart: framebuffer: {e}");
             }

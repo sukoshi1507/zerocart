@@ -6,12 +6,15 @@
 
 pub mod canvas;
 pub mod font;
+pub mod icons;
 pub mod i18n;
+pub mod screens;
 pub mod style;
 pub mod widgets;
 
 pub use canvas::{Canvas, Rgb};
 pub use font::Fonts;
+pub use icons::{Sprite, System};
 pub use i18n::Lang;
 
 pub const SCREEN_W: i32 = 320;

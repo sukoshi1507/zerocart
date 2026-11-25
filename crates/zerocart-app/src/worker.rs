@@ -17,6 +17,10 @@ use std::time::{Duration, Instant};
 
 #[derive(Debug)]
 pub enum Cmd {
+    /// Opens the reader the user confirmed and checks that it answers (the handshake).
+    Connect(zerocart_core::ReaderKind),
+    /// Closes the reader and forgets the cartridge.
+    Disconnect,
     /// `dmg`: Game Boy mode (5 V). The default, safe mode is GBA (3.3 V).
     Detect { dmg: bool },
     ReadRom,
@@ -32,6 +36,8 @@ pub enum Cmd {
 
 #[derive(Debug)]
 pub enum Event {
+    /// The answer to `Connect`: what the top bar shows about the reader, or why it did not answer.
+    Connected(Result<ReaderView, String>),
     Detected(Result<(ReaderView, Option<CartView>), String>),
     Progress { label: String, done: u64, total: u64, kib_s: f32 },
     Finished(Result<String, String>),
@@ -79,7 +85,26 @@ impl Dev {
         }
     }
 
+    /// The reader of this kind (the Krikzz Mega Drive programmer is not a cartridge reader of this application yet).
+    fn open_kind(kind: zerocart_core::ReaderKind) -> Result<Dev, String> {
+        use zerocart_core::ReaderKind;
+        match kind {
+            ReaderKind::GbxCart => {
+                let port = find_ports().into_iter().next().ok_or("GBFlash / GBxCart RW non trouvé")?;
+                let t = SerialTransport::open(&port, 1_000_000).map_err(|e| e.to_string())?;
+                GbxCart::connect(t, Duration::from_millis(200)).map(Dev::Gbx).map_err(|e| format!("le lecteur ne répond pas : {e}"))
+            }
+            ReaderKind::Chisflash => {
+                let port = chis::find_ports().into_iter().next().ok_or("Chisflash non trouvé")?;
+                let t = SerialTransport::open(&port, chis::BAUD).map_err(|e| e.to_string())?;
+                Chis::new(t).map(Dev::Chis).map_err(|e| format!("le lecteur ne répond pas : {e}"))
+            }
+            other => Err(format!("{} : bientôt", other.label())),
+        }
+    }
+
     /// The first reader found: GBxCart RW / GBFlash first, then the Chisflash.
+    #[allow(dead_code)]
     fn open() -> Result<Dev, String> {
         if let Some(port) = find_ports().into_iter().next() {
             let t = SerialTransport::open(&port, 1_000_000).map_err(|e| e.to_string())?;
@@ -97,9 +122,34 @@ impl Worker {
     pub fn run(self, rx: Receiver<Cmd>, tx: Sender<Event>) {
         let mut dev: Option<Dev> = None;
         let mut cart: Option<Cart> = None;
+        let mut kind: Option<zerocart_core::ReaderKind> = None;
         while let Ok(cmd) = rx.recv() {
             self.cancel.store(false, Ordering::SeqCst);
             match cmd {
+                Cmd::Connect(k) => {
+                    if let Some(mut d) = dev.take() {
+                        let _ = d.r().close();
+                    }
+                    cart = None;
+                    kind = None;
+                    match self.connect(k) {
+                        Ok((d, view)) => {
+                            dev = d;
+                            kind = Some(k);
+                            let _ = tx.send(Event::Connected(Ok(view)));
+                        }
+                        Err(e) => {
+                            let _ = tx.send(Event::Connected(Err(e)));
+                        }
+                    }
+                }
+                Cmd::Disconnect => {
+                    if let Some(mut d) = dev.take() {
+                        let _ = d.r().close();
+                    }
+                    cart = None;
+                    kind = None;
+                }
                 Cmd::Analyze => {
                     let r = match (dev.as_mut(), cart.as_ref()) {
                         (Some(d), Some(c)) => self.analyze(d, c),
@@ -112,14 +162,14 @@ impl Worker {
                         (Some(d), Some(c)) => self.flash_rom(d, c, &path, &tx),
                         _ => Err("aucune cartouche".into()),
                     };
-                    self.after_write(&mut dev, &mut cart, r, &tx);
+                    self.after_write(&mut dev, kind, &mut cart, r, &tx);
                 }
                 Cmd::WriteSave(path) => {
                     let r = match (dev.as_mut(), cart.as_ref()) {
                         (Some(d), Some(c)) => self.write_save(d, c, &path, &tx),
                         _ => Err("aucune cartouche".into()),
                     };
-                    self.after_write(&mut dev, &mut cart, r, &tx);
+                    self.after_write(&mut dev, kind, &mut cart, r, &tx);
                 }
                 Cmd::Quit => {
                     if let Some(d) = dev.as_mut() {
@@ -128,7 +178,7 @@ impl Worker {
                     return;
                 }
                 Cmd::Detect { dmg } => {
-                    let r = self.detect(&mut dev, dmg);
+                    let r = self.detect(&mut dev, kind, dmg);
                     let _ = tx.send(Event::Detected(r.map(|(rv, c)| {
                         let view = c.as_ref().map(|(v, _)| v.clone());
                         cart = c.map(|(_, c)| c);
@@ -153,10 +203,26 @@ impl Worker {
         }
     }
 
+    /// Opens the reader of `kind` and asks it who it is. The Krikzz programmer is only handshaken (nothing is read
+    /// from a cartridge yet) and closed again.
+    fn connect(&self, kind: zerocart_core::ReaderKind) -> Result<(Option<Dev>, ReaderView), String> {
+        use zerocart_core::ReaderKind;
+        if kind == ReaderKind::KrikzzMd {
+            let port = zerocart_core::krikzz::find_ports().into_iter().next().ok_or("carte Krikzz non trouvée")?;
+            let t = SerialTransport::open(&port, 9600).map_err(|e| format!("{port} : {e}"))?;
+            zerocart_core::krikzz::FlashKit::connect(t).map_err(|e| format!("la carte ne répond pas : {e}"))?;
+            return Ok((None, ReaderView { name: "Krikzz FlashKit MD".into(), firmware: String::new(), voltage: "" }));
+        }
+        let mut d = Dev::open_kind(kind)?;
+        let info = d.r().info(CartMode::Agb);
+        let view = ReaderView { name: info.name, firmware: info.firmware, voltage: info.voltage };
+        Ok((Some(d), view))
+    }
+
     /// After a write the cartridge may have changed: identify it again, then report the result.
-    fn after_write(&self, dev: &mut Option<Dev>, cart: &mut Option<Cart>, result: Result<String, String>, tx: &Sender<Event>) {
+    fn after_write(&self, dev: &mut Option<Dev>, kind: Option<zerocart_core::ReaderKind>, cart: &mut Option<Cart>, result: Result<String, String>, tx: &Sender<Event>) {
         let dmg = cart.as_ref().is_none_or(|c| c.mode == CartMode::Dmg);
-        if let Ok((reader, found)) = self.detect(dev, dmg) {
+        if let Ok((reader, found)) = self.detect(dev, kind, dmg) {
             let view = found.as_ref().map(|(v, _)| v.clone());
             *cart = found.map(|(_, c)| c);
             let _ = tx.send(Event::Detected(Ok((reader, view))));
@@ -463,11 +529,14 @@ impl Worker {
         }
     }
 
-    fn detect(&self, dev: &mut Option<Dev>, dmg: bool) -> Result<(ReaderView, Option<(CartView, Cart)>), String> {
+    fn detect(&self, dev: &mut Option<Dev>, kind: Option<zerocart_core::ReaderKind>, dmg: bool) -> Result<(ReaderView, Option<(CartView, Cart)>), String> {
         if let Some(mut d) = dev.take() {
             let _ = d.r().close(); // leaves the cartridge unpowered before reconnecting
         }
-        let mut d = Dev::open()?;
+        let mut d = match kind {
+            Some(k) => Dev::open_kind(k)?,
+            None => Dev::open()?,
+        };
         let mode = if dmg { CartMode::Dmg } else { CartMode::Agb };
         let header = d.r().read_header(mode).map_err(|e| e.to_string())?;
         let info = d.r().info(mode);
