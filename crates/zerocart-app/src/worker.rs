@@ -944,17 +944,20 @@ impl Worker {
         let started = Instant::now();
         let label = msg::reading_rom(l, &c.title);
         let total = c.rom_size as u64;
-        let mut progress = |done: usize| {
+        let progress = |done: usize| {
             let kib_s = done as f32 / 1024.0 / started.elapsed().as_secs_f32().max(0.001);
             let _ = tx.send(Event::Progress { label: label.clone(), done: done as u64, total, kib_s });
             !self.cancel.load(Ordering::SeqCst)
         };
+        // Game Boy only: how the reads agreed (how many passes, banks put right by a vote, banks nobody agreed on)
+        let mut gb_note: Option<GbReadNote> = None;
         let result: Result<(u32, Option<bool>), String> = match c.dmg {
             Some((mapper, global)) => {
                 let mapper = mapper.ok_or_else(|| msg::mapper_unsupported(l))?;
-                d.r().dump_dmg_rom(mapper, c.rom_size, &mut out, &mut progress)
-                    .map(|s| (s.crc32, Some(s.checksum16 == global)))
-                    .map_err(|e| e.to_string())
+                self.read_gb_rom(d, mapper, c, global, tx, &mut out).map(|(crc, ok, note)| {
+                    gb_note = Some(note);
+                    (crc, Some(ok))
+                })
             }
             None => {
                 let mut crc = Crc32::new();
@@ -995,13 +998,71 @@ impl Worker {
         out.flush().map_err(|e| e.to_string())?;
         drop(out);
         let file = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+        let note = gb_note.unwrap_or_default();
         match (&c.entry, header_ok) {
             (Some(e), _) if e.rc == got => Ok(msg::rom_verified_crc(l, &file)),
+            (Some(_), _) if note.unresolved == 0 && note.passes >= 2 && note.identical => Ok(msg::rom_stable_checksum_differs(l, &file)),
             (Some(_), _) => Err(msg::rom_crc_differs(l, &file)),
+            (None, Some(true)) if note.corrected > 0 => Ok(msg::rom_corrected(l, &file, note.corrected)),
             (None, Some(true)) => Ok(msg::rom_verified_header(l, &file)),
+            // two reads that agree with each other: the cartridge says what it says, its header is what is wrong
+            (None, Some(false)) if note.unresolved == 0 && note.passes >= 2 && note.identical => Ok(msg::rom_stable_checksum_differs(l, &file)),
             (None, Some(false)) => Err(msg::rom_header_checksum_wrong(l, &file)),
             (None, None) => Ok(msg::rom_unverifiable(l, &file)),
         }
+    }
+
+    /// Reads a Game Boy ROM so that a burst of wrong bytes (seen on hardware, now and then) does not end in a bad
+    /// file: one pass; if its checksum matches the header (or the database), that is all. Otherwise a second pass; if the
+    /// two agree the cartridge really holds that; if not, a third pass and a vote per bank, bank by bank. Writes the
+    /// result to `out` and returns its CRC-32, whether its Game Boy checksum matches the header's, and what happened.
+    fn read_gb_rom(
+        &self,
+        d: &mut Dev,
+        mapper: DmgMapper,
+        c: &Cart,
+        header_checksum: u16,
+        tx: &Sender<Event>,
+        out: &mut dyn Write,
+    ) -> Result<(u32, bool, GbReadNote), String> {
+        let l = self.lang();
+        let started = Instant::now();
+        let total = c.rom_size as u64;
+        let mut passes: Vec<Vec<u8>> = Vec::new();
+        let good = |data: &[u8]| -> bool {
+            gb_global_checksum(data) == header_checksum || c.entry.as_ref().is_some_and(|e| e.rc == crc32_of(data))
+        };
+        for pass in 1..=3usize {
+            let label = if pass == 1 { msg::reading_rom(l, &c.title) } else { msg::reading_rom_pass(l, &c.title, pass) };
+            let mut data = Vec::with_capacity(c.rom_size);
+            d.r()
+                .dump_dmg_rom(mapper, c.rom_size, &mut data, &mut |done| {
+                    let kib_s = done as f32 / 1024.0 / started.elapsed().as_secs_f32().max(0.001);
+                    let _ = tx.send(Event::Progress { label: label.clone(), done: done as u64, total, kib_s });
+                    !self.cancel.load(Ordering::SeqCst)
+                })
+                .map_err(|e| if matches!(e, zerocart_core::Error::Cancelled) { msg::cancelled(l) } else { e.to_string() })?;
+            let ok = good(&data);
+            passes.push(data);
+            if ok && pass == 1 {
+                break; // the usual case: nothing to put right
+            }
+            if pass == 2 && passes[0] == passes[1] {
+                break; // two reads agree
+            }
+        }
+        let identical = passes.windows(2).all(|w| w[0] == w[1]);
+        let made = passes.len();
+        let (data, corrected, unresolved) = if passes.len() == 3 {
+            let refs: Vec<&[u8]> = passes.iter().map(|p| p.as_slice()).collect();
+            vote_banks(&refs, ROM_BANK)
+        } else {
+            (passes.swap_remove(0), 0, 0)
+        };
+        out.write_all(&data).map_err(|e| e.to_string())?;
+        let crc = crc32_of(&data);
+        let note = GbReadNote { passes: made, corrected, unresolved, identical };
+        Ok((crc, good(&data), note))
     }
 
     fn read_save(&self, d: &mut Dev, c: &Cart, tx: &Sender<Event>) -> Result<String, String> {
@@ -1111,6 +1172,60 @@ fn write_save_data(d: &mut Dev, mapper: Option<DmgMapper>, data: &[u8], l: Lang,
     }
 }
 
+/// The size of a Game Boy ROM bank, the unit in which a bad read is put right.
+const ROM_BANK: usize = 0x4000;
+
+/// How the reads of a Game Boy ROM went.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct GbReadNote {
+    /// How many reads of the whole ROM were made (1 to 3).
+    passes: usize,
+    /// Banks whose first read was wrong and was put right by the vote.
+    corrected: usize,
+    /// Banks on which no two reads agreed.
+    unresolved: usize,
+    /// All the reads gave the same bytes.
+    identical: bool,
+}
+
+fn crc32_of(data: &[u8]) -> u32 {
+    let mut crc = Crc32::new();
+    crc.update(data);
+    crc.finalize()
+}
+
+/// The Game Boy global checksum: the sum of every byte except the two of the checksum itself (0x14E-0x14F).
+fn gb_global_checksum(rom: &[u8]) -> u16 {
+    rom.iter().enumerate().filter(|(i, _)| *i != 0x14E && *i != 0x14F).fold(0u16, |s, (_, &b)| s.wrapping_add(b as u16))
+}
+
+/// A vote between reads of the same ROM, bank by bank: a bank's content is the one that at least two reads agree on.
+/// Returns the ROM, how many banks differ from the first read, and how many banks have no majority (the first read's
+/// bank is kept there).
+fn vote_banks(reads: &[&[u8]], bank: usize) -> (Vec<u8>, usize, usize) {
+    let len = reads[0].len();
+    let mut out = Vec::with_capacity(len);
+    let (mut corrected, mut unresolved) = (0, 0);
+    for start in (0..len).step_by(bank) {
+        let end = (start + bank).min(len);
+        let slices: Vec<&[u8]> = reads.iter().map(|r| &r[start..end]).collect();
+        let winner = slices.iter().find(|s| slices.iter().filter(|o| *o == *s).count() >= 2);
+        match winner {
+            Some(w) => {
+                if *w != slices[0] {
+                    corrected += 1;
+                }
+                out.extend_from_slice(w);
+            }
+            None => {
+                unresolved += 1;
+                out.extend_from_slice(slices[0]);
+            }
+        }
+    }
+    (out, corrected, unresolved)
+}
+
 /// File name stem of a save whose retention could not be checked (the reader cannot cut the power), so it is not
 /// mistaken for a real, verified save.
 fn unverified_stem(stem: &str) -> String {
@@ -1148,6 +1263,39 @@ pub fn unique_path(dir: &Path, name: &str, ext: &str) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_vote_between_three_reads_puts_a_bad_bank_right() {
+        let good: Vec<u8> = (0..0x10000usize).map(|i| (i * 7 + 3) as u8).collect();
+        let mut bad = good.clone();
+        bad[0x4100..0x4180].fill(0x6E); // a burst of wrong bytes inside bank 1
+        let (out, corrected, unresolved) = vote_banks(&[&bad, &good, &good], ROM_BANK);
+        assert_eq!((out, corrected, unresolved), (good.clone(), 1, 0), "the first read was the wrong one");
+        let (out, corrected, unresolved) = vote_banks(&[&good, &bad, &good], ROM_BANK);
+        assert_eq!((out, corrected, unresolved), (good.clone(), 0, 0), "a wrong second read changes nothing");
+        // three reads that disagree on one bank: no majority, the first read is kept and it is counted
+        let (mut a, mut b) = (good.clone(), good.clone());
+        a[0x8000] ^= 1;
+        b[0x8000] ^= 2;
+        let (out, corrected, unresolved) = vote_banks(&[&a, &b, &good], ROM_BANK);
+        assert_eq!((corrected, unresolved), (0, 1));
+        assert_eq!(out[0x8000], a[0x8000]);
+        // the last bank may be shorter than a bank
+        let short = &good[..0xC100];
+        assert_eq!(vote_banks(&[short, short, short], ROM_BANK).0, short);
+    }
+
+    #[test]
+    fn the_game_boy_checksum_skips_its_own_two_bytes() {
+        let mut rom = vec![1u8; 0x200];
+        let before = gb_global_checksum(&rom);
+        rom[0x14E] = 0xAA;
+        rom[0x14F] = 0xBB;
+        assert_eq!(gb_global_checksum(&rom), before, "the checksum bytes do not count");
+        rom[0x150] = 9;
+        assert_eq!(gb_global_checksum(&rom), before.wrapping_add(8));
+        assert_eq!(gb_global_checksum(&[]), 0);
+        assert_eq!(crc32_of(b"123456789"), 0xCBF43926, "the standard CRC-32 check value");
+    }
     use super::*;
 
     #[test]

@@ -103,6 +103,13 @@ pub fn verifying(l: Lang) -> String {
 pub fn reading_rom(l: Lang, title: &str) -> String {
     loc!(l, fr: format!("Lecture ROM : {title}"), en: format!("Reading ROM: {title}"), ja: format!("ROM読み出し：{title}"), zh: format!("读取ROM：{title}"))
 }
+pub fn reading_rom_pass(l: Lang, title: &str, pass: usize) -> String {
+    loc!(l,
+        fr: format!("Lecture ROM : {title} ({pass}e passe)"),
+        en: format!("Reading ROM: {title} (pass {pass})"),
+        ja: format!("ROM読み出し：{title}（{pass}回目）"),
+        zh: format!("读取ROM：{title}（第{pass}遍）"))
+}
 pub fn reading_save_progress(l: Lang) -> String {
     loc!(l, fr: "Lecture de la sauvegarde", en: "Reading the save", ja: "セーブを読み出し中", zh: "正在读取存档").into()
 }
@@ -560,6 +567,20 @@ pub fn rom_verified_header(l: Lang, file: &str) -> String {
         en: format!("ROM verified (header checksum OK): {file}"),
         ja: format!("ROMを検証しました（ヘッダーのチェックサム一致）：{file}"),
         zh: format!("ROM已验证（文件头校验和一致）：{file}"))
+}
+pub fn rom_corrected(l: Lang, file: &str, banks: usize) -> String {
+    loc!(l,
+        fr: format!("ROM vérifiée (checksum de l'en-tête OK) après relecture de {banks} banque(s) mal lue(s) : {file}"),
+        en: format!("ROM verified (header checksum OK) after re-reading {banks} badly read bank(s): {file}"),
+        ja: format!("ROMを検証しました（ヘッダーのチェックサム一致）。誤読した{banks}バンクを再読込：{file}"),
+        zh: format!("ROM已验证（文件头校验和一致），已重读{banks}个读错的存储块：{file}"))
+}
+pub fn rom_stable_checksum_differs(l: Lang, file: &str) -> String {
+    loc!(l,
+        fr: format!("!ROM lue deux fois à l'identique, mais le checksum de l'en-tête diffère (fréquent sur les ROM amateur) : {file}"),
+        en: format!("!ROM read twice with the same result, but the header checksum differs (common on homebrew ROMs): {file}"),
+        ja: format!("!ROMを2回読み出して同じ結果でしたが、ヘッダーのチェックサムが異なります（自作ROMではよくあります）：{file}"),
+        zh: format!("!ROM两次读取结果一致，但文件头校验和不同（自制ROM常见）：{file}"))
 }
 pub fn rom_header_checksum_wrong(l: Lang, file: &str) -> String {
     loc!(l,
