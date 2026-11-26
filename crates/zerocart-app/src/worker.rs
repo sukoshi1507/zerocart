@@ -777,15 +777,18 @@ impl Worker {
         }
         .map_err(|e| msg::failed_backup_in(l, &e.to_string(), &backup.display().to_string()))?;
 
-        // 3. Verify.
-        let mut after = Vec::new();
-        d.r().dump_dmg_rom(mapper, rom.len(), &mut after, &mut |_| true).map_err(|e| e.to_string())?;
+        // 3. Verify. A read of a Game Boy cartridge can be wrong now and then (a burst of bad bytes that is not in the
+        // cartridge: seen on hardware, the next read was perfect). Only a difference that shows up in two reads in a row
+        // is a failed write; one wrong read is read again.
         let name = backup.file_name().unwrap_or_default().to_string_lossy().into_owned();
-        if after == rom {
-            Ok(msg::gb_written_ok(l, report.rewritten as usize, &name))
-        } else {
-            Err(msg::written_mismatch(l, &name))
+        for _ in 0..2 {
+            let mut after = Vec::new();
+            d.r().dump_dmg_rom(mapper, rom.len(), &mut after, &mut |_| true).map_err(|e| e.to_string())?;
+            if after == rom {
+                return Ok(msg::gb_written_ok(l, report.rewritten as usize, &name));
+            }
         }
+        Err(msg::written_mismatch(l, &name))
     }
 
     fn write_save(&self, d: &mut Dev, c: &Cart, path: &Path, tx: &Sender<Event>) -> Result<String, String> {
