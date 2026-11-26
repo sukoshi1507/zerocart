@@ -374,28 +374,17 @@ impl App {
         };
         self.banner = None;
         let md = self.system == System::MegaDrive;
-        if md && action == Action::WriteSave {
-            self.banner = Some((
-                loc!(lang,
-                    fr: "Sauvegarde Mega Drive : écriture pas encore gérée",
-                    en: "Mega Drive save writing: not supported yet",
-                    ja: "メガドライブのセーブ書き込みは未対応です",
-                    zh: "暂不支持写入Mega Drive存档")
-                .into(),
-                true,
-            ));
-            return;
-        }
         if action.writes() {
             let gba = cart.system == "GBA";
             let exts: &[&str] = match action {
                 Action::FlashRom if md => &["bin", "md", "gen"],
+                Action::WriteSave if md => &["sav", "srm"],
                 Action::FlashRom if gba => &["gba"],
                 Action::FlashRom => &["gb", "gbc"],
                 _ => &["sav"],
             };
             self.flow_gba = gba;
-            self.flow_md = md;
+            self.flow_md = md && action == Action::FlashRom; // a save has the same confirmation on every system
             let files = list_files(&self.out_dir, exts);
             if files.is_empty() {
                 let (ext, dir) = (exts[0], self.out_dir.display());
@@ -815,7 +804,7 @@ mod tests {
     }
 
     #[test]
-    fn the_mega_drive_reads_its_cartridge_and_writes_a_rom_after_a_confirmation() {
+    fn the_mega_drive_reads_its_cartridge_and_writes_a_save_or_a_rom_after_a_confirmation() {
         let (mut a, rx) = fresh(vec![plugged(ReaderKind::KrikzzMd)]);
         down(&mut a, Key::Enter);
         for _ in 0..3 {
@@ -835,18 +824,26 @@ mod tests {
         down(&mut a, Key::Enter);
         assert!(matches!(rx.try_recv().unwrap(), Cmd::ReadRom));
         a.on_event(Event::Finished(Ok("ROM lue".into())));
-        // saves cannot be written yet: refused before anything is asked
-        a.action_sel = 2;
-        down(&mut a, Key::Enter);
-        assert!(rx.try_recv().is_err(), "nothing is sent");
-        assert_eq!(a.banner, Some(("Sauvegarde Mega Drive : écriture pas encore gérée".into(), true)));
-        // flashing a ROM asks for a file (.bin/.md/.gen), then a confirmation on Y, then sends the command
+        // a save: asks for a .sav/.srm file, then a confirmation on Y (the same text as on every system), then writes
         let dir = std::env::temp_dir().join(format!("zerocart-md-app-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("partie.srm"), vec![0u8; 0x1000]).unwrap();
+        std::fs::write(dir.join("autre.txt"), b"x").unwrap();
+        a.out_dir = dir.clone();
+        a.action_sel = 2;
+        down(&mut a, Key::Enter);
+        assert!(rx.try_recv().is_err(), "choosing a file sends nothing");
+        down(&mut a, Key::Enter); // the only save file
+        assert!(a.confirm_lines.iter().any(|l| l.contains("partie.srm")), "{:?}", a.confirm_lines);
+        down(&mut a, Key::Enter);
+        assert!(rx.try_recv().is_err(), "Enter does not confirm a write");
+        down(&mut a, Key::Char('y'));
+        assert!(matches!(rx.try_recv().unwrap(), Cmd::WriteSave(p) if p.ends_with("partie.srm")));
+        a.on_event(Event::Finished(Ok("ok".into())));
+        // flashing a ROM asks for a file (.bin/.md/.gen), then a confirmation on Y, then sends the command
         std::fs::write(dir.join("jeu.bin"), vec![0u8; 0x600000]).unwrap(); // 6 MiB: the upper half is tested first
         std::fs::write(dir.join("jeu.gba"), b"x").unwrap();
-        a.out_dir = dir.clone();
         a.action_sel = 3;
         down(&mut a, Key::Enter);
         assert!(rx.try_recv().is_err(), "choosing a file sends nothing");

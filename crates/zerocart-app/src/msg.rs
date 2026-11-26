@@ -123,6 +123,14 @@ pub fn md_save_write_unsupported(l: Lang) -> String {
         zh: "暂不支持写入Mega Drive存档")
     .into()
 }
+pub fn md_no_sram(l: Lang) -> String {
+    loc!(l,
+        fr: "Aucune mémoire de sauvegarde ne répond sur cette cartouche (cartouche flash sans SRAM ?) : rien n'est écrit",
+        en: "No save RAM answers on this cartridge (a flash cartridge without SRAM?): nothing is written",
+        ja: "このカートにはセーブRAMの応答がありません（SRAMのないフラッシュカート？）：何も書き込みません",
+        zh: "此卡带没有存档RAM响应（无SRAM的闪存卡带？）：未写入任何内容")
+    .into()
+}
 pub fn md_bad_size(l: Lang) -> String {
     loc!(l,
         fr: "taille de fichier invalide pour une ROM Mega Drive",

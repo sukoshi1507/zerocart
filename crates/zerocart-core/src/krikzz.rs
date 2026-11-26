@@ -271,6 +271,60 @@ impl<T: Transport> FlashKit<T> {
         Ok(MdDump { crc32: crc.finalize(), checksum16: sum.finalize() })
     }
 
+    /// Writes `data` (even length) from `byte_addr` with the address auto-incrementing, in blocks of 64 KiB.
+    pub fn write(&mut self, byte_addr: u32, data: &[u8]) -> Result<()> {
+        if data.len() % 2 != 0 || byte_addr % 2 != 0 {
+            return Err(invalid("the Mega Drive bus is written in 16-bit words: even address and length"));
+        }
+        self.set_addr(byte_addr)?;
+        for block in data.chunks(BLOCK) {
+            let words = (block.len() / 2) as u16;
+            let mut cmd = vec![CMD_LEN, (words >> 8) as u8, CMD_LEN, words as u8, CMD_WR | PAR_INC];
+            cmd.extend_from_slice(block);
+            self.t.write_all(&cmd)?;
+        }
+        Ok(())
+    }
+
+    /// Whether the save RAM window holds a real RAM: the first word is inverted, read back, and put back. Only
+    /// the data byte (the odd one) of a RAM keeps what is written; on a flash cartridge without RAM the writes are
+    /// ignored and the answer is `false`. Writes one word at the start of the save window, twice, and the bank register.
+    pub fn ram_present(&mut self) -> Result<bool> {
+        self.set_delay(1)?;
+        self.write_word(BANK_REGISTER, 0xFFFF)?;
+        let result = (|| -> Result<bool> {
+            let first = self.read_word(SAVE_WINDOW)?;
+            self.write_word(SAVE_WINDOW, first ^ 0xFFFF)?;
+            let flipped = self.read_word(SAVE_WINDOW)? ^ 0xFFFF;
+            self.write_word(SAVE_WINDOW, first)?; // put it back whatever the answer
+            Ok(first & 0x00FF == flipped & 0x00FF)
+        })();
+        let _ = self.write_word(BANK_REGISTER, 0x0000);
+        result
+    }
+
+    /// DESTRUCTIVE. Writes a save as a word stream (`2 * save_bytes` bytes, data on the odd bytes; see
+    /// `megadrive::save_file_to_stream`) into the save RAM and reads it back: only the odd bytes are compared. The ROM
+    /// is mapped back at the end. The caller checks [`ram_present`](Self::ram_present) first and keeps a backup.
+    pub fn write_save_stream(&mut self, stream: &[u8]) -> Result<()> {
+        if stream.is_empty() || stream.len() % 2 != 0 {
+            return Err(invalid("a save stream is made of 16-bit words"));
+        }
+        self.set_delay(1)?;
+        self.write_word(BANK_REGISTER, 0xFFFF)?;
+        let result = (|| -> Result<()> {
+            self.write(SAVE_WINDOW, stream)?;
+            let back = self.read(SAVE_WINDOW, stream.len())?;
+            let wrong = stream.chunks(2).zip(back.chunks(2)).filter(|(a, b)| a[1] != b[1]).count();
+            if wrong > 0 {
+                return Err(invalid("the save RAM did not keep what was written"));
+            }
+            Ok(())
+        })();
+        let _ = self.write_word(BANK_REGISTER, 0x0000);
+        result
+    }
+
     /// Reads the save RAM as the bus shows it: `save_bytes` of data are on the ODD bytes of a word stream of
     /// `2 * save_bytes` bytes (even bytes read as open bus). The ROM is mapped back at the end. Only the bank register
     /// is written.
@@ -708,6 +762,8 @@ mod tests {
         buf_words: Vec<(u32, u16)>,
         /// How many buffers were programmed.
         buffers: usize,
+        /// The cartridge has no save RAM: the window shows ROM and writes there are ignored (a flash cartridge).
+        no_sram: bool,
         /// The write buffer commit does nothing (a chip whose buffer programming fails).
         buffer_broken: bool,
         /// The upper half of the chip cannot be written (a cartridge wired as 4 MiB): erase and program are ignored.
@@ -719,7 +775,7 @@ mod tests {
         fn new(rom: Vec<u8>) -> Self {
             Self {
                 id: [0x42, 0x42], rom, sram: vec![0; 0x4000], bank: 0, addr: 0, len: 0, delay: 0, rx: vec![],
-                out: VecDeque::new(), chip: Chip::Array, flash: false, unlock: vec![], writes: vec![], log: vec![], erased: vec![], upper_dead: false, erased_ignored: 0, buf_left: 0, buf_words: vec![], buffers: 0, buffer_broken: false,
+                out: VecDeque::new(), chip: Chip::Array, flash: false, unlock: vec![], writes: vec![], log: vec![], erased: vec![], upper_dead: false, erased_ignored: 0, buf_left: 0, buf_words: vec![], buffers: 0, buffer_broken: false, no_sram: false,
             }
         }
 
@@ -732,7 +788,7 @@ mod tests {
         }
 
         fn read_word(&self, a: u32) -> u16 {
-            if a >= 0x100000 && self.bank == 0xFFFF {
+            if a >= 0x100000 && self.bank == 0xFFFF && !self.no_sram {
                 let i = (a - 0x100000) as usize;
                 return 0xFF00 | *self.sram.get(i).unwrap_or(&0xFF) as u16;
             }
@@ -761,7 +817,7 @@ mod tests {
                 self.bank = v;
                 return;
             }
-            if a >= 0x100000 && self.bank == 0xFFFF {
+            if a >= 0x100000 && self.bank == 0xFFFF && !self.no_sram {
                 let i = (a - 0x100000) as usize;
                 if i < self.sram.len() {
                     self.sram[i] = v as u8;
@@ -1064,6 +1120,67 @@ mod tests {
         assert!(stream.chunks(2).all(|w| w[0] == 0xFF), "even bytes read as open bus");
         assert_eq!(k.into_inner().bank, 0, "the ROM is mapped back");
         assert!(kit(game()).read_save_stream(0).is_err());
+    }
+
+    #[test]
+    fn a_cartridge_with_save_ram_is_told_from_one_without_and_the_probe_puts_the_word_back() {
+        let mut s = Sim::new(game());
+        s.sram[0] = 0x5A;
+        s.sram[1] = 0xA5;
+        let mut k = FlashKit::connect(s).unwrap();
+        assert!(k.ram_present().unwrap());
+        let s = k.into_inner();
+        assert_eq!((s.sram[0], s.sram[1]), (0x5A, 0xA5), "the word was put back");
+        assert_eq!(s.bank, 0, "the ROM is mapped again");
+        // a flash cartridge: the window shows ROM and the writes are ignored
+        let mut s = Sim::new(game());
+        s.no_sram = true;
+        s.flash = true;
+        let rom = s.rom.clone();
+        let mut k = FlashKit::connect(s).unwrap();
+        assert!(!k.ram_present().unwrap());
+        assert_eq!(k.into_inner().rom, rom, "the probe changed nothing in the flash");
+    }
+
+    #[test]
+    fn a_save_is_written_to_the_odd_bytes_read_back_and_the_rom_is_mapped_again() {
+        let data: Vec<u8> = (0..0x800usize).map(|i| (i * 3 + 1) as u8).collect();
+        let stream = crate::megadrive::save_file_to_stream(&data, data.len()).unwrap();
+        let mut k = FlashKit::connect(Sim::new(game())).unwrap();
+        k.write_save_stream(&stream).unwrap();
+        let s = k.into_inner();
+        assert_eq!(s.sram[..data.len()], data[..]);
+        assert_eq!(s.bank, 0);
+        // it reads back as the same stream
+        let mut k = FlashKit::connect(s).unwrap();
+        let back = k.read_save_stream(data.len()).unwrap();
+        assert_eq!(crate::megadrive::stream_to_data(&back), data);
+        // bad input is refused before anything is written
+        assert!(k.write_save_stream(&[]).is_err() && k.write_save_stream(&[1, 2, 3]).is_err());
+    }
+
+    #[test]
+    fn a_ram_that_does_not_keep_the_data_is_reported() {
+        let mut s = Sim::new(game());
+        s.no_sram = true; // writes go nowhere
+        let mut k = FlashKit::connect(s).unwrap();
+        let stream = crate::megadrive::save_file_to_stream(&[0x12, 0x34, 0x56, 0x78], 4).unwrap();
+        let e = k.write_save_stream(&stream).unwrap_err();
+        assert!(e.to_string().contains("did not keep"), "{e}");
+        assert_eq!(k.into_inner().bank, 0, "the ROM is mapped again even after an error");
+    }
+
+    #[test]
+    fn large_block_writes_are_split_in_chunks_of_64_kib() {
+        let mut k = flash_kit();
+        // 0x30000 bytes in the ROM area of a plain (non flash) sim
+        let mut s = Sim::new(vec![0u8; 0x40000]);
+        s.flash = false;
+        let mut kit = FlashKit::connect(s).unwrap();
+        kit.write(0x10000, &vec![0xAB; 0x30000]).unwrap();
+        let log = kit.into_inner().log;
+        assert_eq!(log.iter().filter(|&&c| c == (CMD_WR | PAR_INC)).count(), 3, "0x30000 bytes are three blocks of 64 KiB");
+        assert!(k.write(1, &[0, 0]).is_err() && k.write(0, &[0]).is_err());
     }
 
     #[test]

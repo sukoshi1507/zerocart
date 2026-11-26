@@ -284,10 +284,54 @@ impl Worker {
                 }
                 let _ = tx.send(Event::Finished(r));
             }
+            Cmd::WriteSave(path) => {
+                let r = self.md_write_save(md, &path, tx);
+                let _ = tx.send(Event::Finished(r));
+            }
             _ => {
                 let _ = tx.send(Event::Finished(Err(msg::md_save_write_unsupported(self.lang()))));
             }
         }
+    }
+
+    /// Writes a save file to the save RAM of a Mega Drive cartridge: the file is a word stream (`2 * size` bytes) or the
+    /// plain data (`size` bytes); a RAM must answer; the current save is kept first (two reads that agree) and the
+    /// result is read back. The reader cannot cut the power, so the result is always a warning ("not verified").
+    fn md_write_save(&self, md: &mut MdState, path: &Path, tx: &Sender<Event>) -> Result<String, String> {
+        let l = self.lang();
+        let h = md.header.clone().ok_or_else(|| msg::no_cartridge(l))?;
+        let ram = h.ram.ok_or_else(|| msg::md_no_save_declared(l))?;
+        let file = std::fs::read(path).map_err(|e| e.to_string())?;
+        let stream = zerocart_core::megadrive::save_file_to_stream(&file, ram.size()).ok_or_else(|| msg::save_size_mismatch(l, file.len(), ram.size()))?;
+        if !md.kit.ram_present().map_err(|e| e.to_string())? {
+            return Err(msg::md_no_sram(l));
+        }
+        let progress = |label: &str, done: usize, total: usize| {
+            let _ = tx.send(Event::Progress { label: label.to_string(), done: done as u64, total: total as u64, kib_s: 0.0 });
+        };
+        // 1. keep the current save when it reads the same twice
+        progress(msg::backing_up_old_save(l), 0, 3);
+        let a = md.kit.read_save_stream(ram.size()).map_err(|e| e.to_string())?;
+        progress(msg::backing_up_old_save(l), 1, 3);
+        let b = md.kit.read_save_stream(ram.size()).map_err(|e| e.to_string())?;
+        let note = if a == b {
+            let dir = self.out_dir.join("backups");
+            std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+            let title = if h.title().is_empty() { "megadrive".to_string() } else { sanitize(h.title()) };
+            let backup = unique_path(&dir, &unverified_stem(&format!("{title} avant écriture")), "sav");
+            std::fs::write(&backup, &a).map_err(|e| e.to_string())?;
+            msg::note_old_save(l, &backup.file_name().unwrap_or_default().to_string_lossy())
+        } else {
+            msg::note_old_save_unstable(l)
+        };
+        // 2. write, then read back in the same session
+        progress(msg::writing_save(l), 2, 3);
+        md.kit.write_save_stream(&stream).map_err(|e| format!("{e}{note}"))?;
+        let back = md.kit.read_save_stream(ram.size()).map_err(|e| e.to_string())?;
+        if zerocart_core::megadrive::stream_to_data(&back) != zerocart_core::megadrive::stream_to_data(&stream) {
+            return Err(msg::save_readback_differs(l, &note));
+        }
+        Ok(msg::save_written_unverified(l, &note))
     }
 
     /// Writes a ROM file to the flash cartridge: checks, backup of what is overwritten (two reads that must agree),

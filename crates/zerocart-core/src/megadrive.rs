@@ -131,6 +131,25 @@ pub fn checksum16(rom: &[u8]) -> u16 {
     rom.get(0x200..).unwrap_or(&[]).chunks_exact(2).fold(0u16, |s, w| s.wrapping_add(u16::from_be_bytes([w[0], w[1]])))
 }
 
+/// The save data of a stream read from the bus: one byte of data per word, on the ODD byte (the even bytes read as
+/// open bus).
+pub fn stream_to_data(stream: &[u8]) -> Vec<u8> {
+    stream.chunks(2).filter_map(|w| w.get(1).copied()).collect()
+}
+
+/// A save file as the bus wants it. Two shapes are accepted: the word stream that `zerocart-md --save` and the
+/// application write (`2 * size` bytes, data on the odd bytes) and the plain data (`size` bytes, what an emulator
+/// keeps for a cartridge with an 8-bit RAM). `None` for any other length.
+pub fn save_file_to_stream(file: &[u8], size: usize) -> Option<Vec<u8>> {
+    if file.len() == 2 * size {
+        Some(file.to_vec())
+    } else if file.len() == size {
+        Some(file.iter().flat_map(|&b| [0xFF, b]).collect())
+    } else {
+        None
+    }
+}
+
 /// Streaming version of [`checksum16`] for a dump written block by block: feed the bytes in order.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Checksum16 {
@@ -199,6 +218,17 @@ mod tests {
         let h = parse_header(&b).unwrap();
         assert!(h.is_32x && h.sega_ok);
         assert_eq!(h.extension(), "32x");
+    }
+
+    #[test]
+    fn save_files_are_accepted_as_a_word_stream_or_as_plain_data() {
+        let data = [0x11u8, 0x22, 0x33];
+        let stream = save_file_to_stream(&data, 3).unwrap();
+        assert_eq!(stream, [0xFF, 0x11, 0xFF, 0x22, 0xFF, 0x33]);
+        assert_eq!(stream_to_data(&stream), data);
+        assert_eq!(save_file_to_stream(&stream, 3).unwrap(), stream, "a stream is kept as it is");
+        assert!(save_file_to_stream(&[0; 5], 3).is_none() && save_file_to_stream(&[], 3).is_none());
+        assert!(stream_to_data(&[1]).is_empty(), "a lone even byte carries no data");
     }
 
     #[test]

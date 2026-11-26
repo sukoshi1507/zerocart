@@ -5,6 +5,8 @@
 //!   zerocart-md --header                   the "SEGA" header of the inserted cartridge
 //!   zerocart-md --dump FILE [--size N]     dump the ROM (size from the header unless --size is given)
 //!   zerocart-md --save FILE                read the save RAM declared by the header
+//!   zerocart-md --ram-check                is there a real save RAM (writes one word twice at the start of the save window)
+//!   zerocart-md --write-save FILE --backup OUT  DESTRUCTIVE: write a save (a dry run unless --yes)
 //!   zerocart-md --identify                 identify the flash chip (CFI query + autoselect + reset commands only)
 //!   zerocart-md --flash FILE --backup OUT  DESTRUCTIVE: write FILE to a flash cartridge; a dry run unless --yes
 //!                                          (the chip's write buffer is used when it has one; --word-by-word forces the slow way)
@@ -69,10 +71,12 @@ fn run() -> Result<(), String> {
     let dump = arg(&args, "--dump");
     let save = arg(&args, "--save");
     let identify = args.iter().any(|a| a == "--identify");
+    let ram_check = args.iter().any(|a| a == "--ram-check");
+    let write_save = arg(&args, "--write-save");
     let flash = arg(&args, "--flash");
     let yes = args.iter().any(|a| a == "--yes");
     let sector_test = arg(&args, "--sector-test");
-    if !(sector_test.is_some() || info || header || identify || dump.is_some() || save.is_some() || flash.is_some()) {
+    if !(ram_check || write_save.is_some() || sector_test.is_some() || info || header || identify || dump.is_some() || save.is_some() || flash.is_some()) {
         println!("usage: zerocart-md --info | --header | --identify | --dump FILE [--size N] | --save FILE   [--port /dev/ttyUSB0]");
         println!("       zerocart-md --flash FILE --backup BACKUP.bin [--yes]   (a dry run unless --yes)");
         println!("nothing is erased or programmed without --flash ... --yes; --identify only sends the chip's query, identifier and reset commands.");
@@ -90,7 +94,7 @@ fn run() -> Result<(), String> {
     let t = SerialTransport::open(&port, 9600).map_err(|e| format!("{port}: {e}"))?;
     let mut kit = FlashKit::connect(t).map_err(|e| format!("handshake: {e}"))?;
     println!("handshake: FlashKit MD programmer answered with a valid id");
-    if info && !(header || identify || dump.is_some() || save.is_some() || flash.is_some()) {
+    if info && !(ram_check || write_save.is_some() || header || identify || dump.is_some() || save.is_some() || flash.is_some()) {
         return Ok(());
     }
 
@@ -155,6 +159,13 @@ fn run() -> Result<(), String> {
         let data: Vec<u8> = stream.chunks(2).map(|w| w[1]).collect();
         println!("save RAM: {} bytes of data ({} bytes with the even bytes) written to {file}", data.len(), stream.len());
         println!("  note: a cartridge without a (battery-backed) save RAM reads noise here; this reader cannot cut the power to tell");
+    }
+    if ram_check {
+        let present = kit.ram_present().map_err(|e| format!("ram check: {e}"))?;
+        println!("save RAM: {}", if present { "present (it keeps what is written)" } else { "NOT present (a flash cartridge without save RAM, or an empty connector)" });
+    }
+    if let Some(file) = write_save {
+        return write_save_cartridge(&mut kit, &h, &file, arg(&args, "--backup"), yes);
     }
     if let Some(off) = sector_test {
         let off = match off.trim().strip_prefix("0x") {
@@ -281,4 +292,39 @@ fn sector_test_run<T: zerocart_core::Transport>(kit: &mut FlashKit<T>, offset: u
         return Err("the sector could not be restored".into());
     }
     Ok(())
+}
+
+/// Writes a save file to the cartridge's save RAM, after a backup of the current content (two reads that agree).
+fn write_save_cartridge<T: zerocart_core::Transport>(kit: &mut FlashKit<T>, h: &MdHeader, file: &str, backup: Option<String>, yes: bool) -> Result<(), String> {
+    let backup = backup.ok_or("--backup FILE is required: the current save is kept there first")?;
+    if Path::new(&backup).exists() {
+        return Err(format!("{backup} already exists: refusing to overwrite a backup"));
+    }
+    let ram = h.ram.ok_or("the header declares no save RAM: nothing to write")?;
+    let data = std::fs::read(file).map_err(|e| format!("{file}: {e}"))?;
+    let stream = megadrive::save_file_to_stream(&data, ram.size())
+        .ok_or_else(|| format!("the file is {} bytes: the save is {} bytes (or {} as a word stream)", data.len(), ram.size(), 2 * ram.size()))?;
+    println!("save: {file}, {} bytes of data for a RAM of {} bytes", data.len().min(ram.size()), ram.size());
+    if !kit.ram_present().map_err(|e| e.to_string())? {
+        return Err("no save RAM answers on this cartridge (a flash cartridge without RAM?): nothing is written".into());
+    }
+    let a = kit.read_save_stream(ram.size()).map_err(|e| e.to_string())?;
+    let b = kit.read_save_stream(ram.size()).map_err(|e| e.to_string())?;
+    if a != b {
+        return Err("two reads of the current save differ: refusing to write".into());
+    }
+    std::fs::write(&backup, &a).map_err(|e| e.to_string())?;
+    println!("current save kept: {backup} ({} bytes)", a.len());
+    if !yes {
+        println!("dry run: nothing was written. Add --yes to write.");
+        return Ok(());
+    }
+    kit.write_save_stream(&stream).map_err(|e| format!("write: {e}; the previous save is in {backup}"))?;
+    let after = kit.read_save_stream(ram.size()).map_err(|e| e.to_string())?;
+    if megadrive::stream_to_data(&after) == megadrive::stream_to_data(&stream) {
+        println!("VERIFIED: the save RAM holds the file (read back in the same session: this reader cannot cut the power, so a dead battery would not show).");
+        Ok(())
+    } else {
+        Err(format!("MISMATCH after writing; the previous save is in {backup}"))
+    }
 }
