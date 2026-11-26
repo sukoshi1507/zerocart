@@ -215,3 +215,5 @@ Wi-Fi de l'utilisateur, sans l'application LocalSend :
   « relire » (R). Pas encore essayé avec l'application LocalSend elle-même (téléphone), à faire avec l'utilisateur.
 - Les noms d'hôte ne se résolvent pas dans un binaire statique sans les bibliothèques de la machine (avertissement de l'éditeur de liens) :
   utiliser une adresse IP pour « ajouter par adresse ».
+
+ZeroSend validé avec l'application LocalSend d'un téléphone (2026-11-26, rev8, essai de l'utilisateur) : « tout fonctionne ».
