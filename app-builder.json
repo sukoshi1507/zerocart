@@ -1,7 +1,7 @@
 {
   "app_name": "ZeroCart",
   "package_name": "zerocart",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "Game Boy, Game Boy Color, Game Boy Advance and Mega Drive cartridge reader and flasher for CardputerZero",
   "store": {
     "summary": "Read and flash Game Boy, GBA and Mega Drive cartridges from the CardputerZero",

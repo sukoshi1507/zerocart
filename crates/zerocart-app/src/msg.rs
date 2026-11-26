@@ -83,19 +83,32 @@ pub fn writing_sectors(l: Lang, done: usize, total: usize, msg: &str) -> String 
         ja: format!("書き込み中（{done}/{total}）抜かないでください：{msg}"),
         zh: format!("正在写入（{done}/{total}）请勿拔出：{msg}"))
 }
-pub fn old_rom_in(l: Lang, e: &str, name: &str) -> String {
-    loc!(l,
-        fr: format!("{e} ; ancienne ROM : backups/{name}"),
-        en: format!("{e}; old ROM: backups/{name}"),
-        ja: format!("{e}；旧ROM：backups/{name}"),
-        zh: format!("{e}；旧ROM：backups/{name}"))
+/// What to say about the backup of the old ROM: its file, or that none was made (the user chose to go without).
+fn old_rom_tail(l: Lang, name: Option<&str>) -> String {
+    match name {
+        Some(n) => loc!(l, fr: format!("ancienne ROM : backups/{n}"), en: format!("old ROM: backups/{n}"), ja: format!("旧ROM：backups/{n}"), zh: format!("旧ROM：backups/{n}")),
+        None => loc!(l, fr: "pas de sauvegarde".to_string(), en: "no backup was made".to_string(), ja: "バックアップなし".to_string(), zh: "未备份".to_string()),
+    }
 }
-pub fn written_mismatch(l: Lang, name: &str) -> String {
-    loc!(l,
-        fr: format!("ROM écrite mais la relecture diffère ; ancienne ROM : backups/{name}"),
-        en: format!("ROM written but the read-back differs; old ROM: backups/{name}"),
-        ja: format!("ROMを書き込みましたが、読み戻しが一致しません；旧ROM：backups/{name}"),
-        zh: format!("ROM已写入，但回读结果不一致；旧ROM：backups/{name}"))
+
+/// The same for a whole chip (GBA).
+fn old_chip_tail(l: Lang, name: Option<&str>) -> String {
+    match name {
+        Some(n) => loc!(l, fr: format!("ancienne puce : backups/{n}"), en: format!("old chip contents: backups/{n}"), ja: format!("旧チップ内容：backups/{n}"), zh: format!("旧芯片内容：backups/{n}")),
+        None => old_rom_tail(l, None),
+    }
+}
+
+pub fn old_rom_in(l: Lang, e: &str, name: Option<&str>) -> String {
+    format!("{e} ; {}", old_rom_tail(l, name))
+}
+pub fn written_mismatch(l: Lang, name: Option<&str>) -> String {
+    let head = loc!(l,
+        fr: "ROM écrite mais la relecture diffère",
+        en: "ROM written but the read-back differs",
+        ja: "ROMを書き込みましたが、読み戻しが一致しません",
+        zh: "ROM已写入，但回读结果不一致");
+    format!("{head} ; {}", old_rom_tail(l, name))
 }
 pub fn verifying(l: Lang) -> String {
     loc!(l, fr: "Vérification de l'écriture", en: "Verifying the write", ja: "書き込みを検証中", zh: "正在验证写入").into()
@@ -193,12 +206,13 @@ pub fn reads_differ(l: Lang) -> String {
         zh: "两次读取卡带的结果不同（接触不良？）：未写入任何内容")
     .into()
 }
-pub fn md_written_ok(l: Lang, rewritten: usize, unchanged: usize, name: &str) -> String {
-    loc!(l,
-        fr: format!("ROM écrite et vérifiée ({rewritten} secteurs réécrits, {unchanged} inchangés) ; ancienne ROM : backups/{name}"),
-        en: format!("ROM written and verified ({rewritten} sectors rewritten, {unchanged} unchanged); old ROM: backups/{name}"),
-        ja: format!("ROMを書き込み、検証しました（{rewritten}セクター書き換え、{unchanged}セクター変更なし）；旧ROM：backups/{name}"),
-        zh: format!("ROM已写入并验证（重写{rewritten}个扇区，{unchanged}个未变）；旧ROM：backups/{name}"))
+pub fn md_written_ok(l: Lang, rewritten: usize, unchanged: usize, name: Option<&str>) -> String {
+    let head = loc!(l,
+        fr: format!("ROM écrite et vérifiée ({rewritten} secteurs réécrits, {unchanged} inchangés)"),
+        en: format!("ROM written and verified ({rewritten} sectors rewritten, {unchanged} unchanged)"),
+        ja: format!("ROMを書き込み、検証しました（{rewritten}セクター書き換え、{unchanged}セクター変更なし）"),
+        zh: format!("ROM已写入并验证（重写{rewritten}个扇区，{unchanged}个未变）"));
+    format!("{head} ; {}", old_rom_tail(l, name))
 }
 pub fn no_md_cartridge(l: Lang) -> String {
     loc!(l, fr: "aucune cartouche Mega Drive", en: "no Mega Drive cartridge", ja: "メガドライブのカートがありません", zh: "没有Mega Drive卡带").into()
@@ -410,19 +424,16 @@ pub fn writing_gba(l: Lang, m: &str) -> String {
         ja: format!("GBA書き込み中、抜かないでください：{m}"),
         zh: format!("正在写入GBA，请勿拔出：{m}"))
 }
-pub fn old_chip_in(l: Lang, e: &str, name: &str) -> String {
-    loc!(l,
-        fr: format!("{e} ; ancienne puce : backups/{name}"),
-        en: format!("{e}; old chip contents: backups/{name}"),
-        ja: format!("{e}；旧チップ内容：backups/{name}"),
-        zh: format!("{e}；旧芯片内容：backups/{name}"))
+pub fn old_chip_in(l: Lang, e: &str, name: Option<&str>) -> String {
+    format!("{e} ; {}", old_chip_tail(l, name))
 }
-pub fn gba_written_ok(l: Lang, attempts: usize, repaired: usize, name: &str) -> String {
-    loc!(l,
-        fr: format!("ROM GBA écrite et vérifiée ({attempts} essai, {repaired} octets réparés) ; ancienne puce : backups/{name}"),
-        en: format!("GBA ROM written and verified ({attempts} attempt, {repaired} bytes repaired); old chip contents: backups/{name}"),
-        ja: format!("GBA ROMを書き込み、検証しました（{attempts}回、{repaired}バイト修復）；旧チップ内容：backups/{name}"),
-        zh: format!("GBA ROM已写入并验证（{attempts}次尝试，修复{repaired}字节）；旧芯片内容：backups/{name}"))
+pub fn gba_written_ok(l: Lang, attempts: usize, repaired: usize, name: Option<&str>) -> String {
+    let head = loc!(l,
+        fr: format!("ROM GBA écrite et vérifiée ({attempts} essai, {repaired} octets réparés)"),
+        en: format!("GBA ROM written and verified ({attempts} attempt, {repaired} bytes repaired)"),
+        ja: format!("GBA ROMを書き込み、検証しました（{attempts}回、{repaired}バイト修復）"),
+        zh: format!("GBA ROM已写入并验证（{attempts}次尝试，修复{repaired}字节）"));
+    format!("{head} ; {}", old_chip_tail(l, name))
 }
 
 // ---- Game Boy flash ----
@@ -458,19 +469,23 @@ pub fn chip_not_recognised(l: Lang) -> String {
         zh: "无法识别闪存芯片（或结果不唯一）：未写入任何内容")
     .into()
 }
-pub fn failed_backup_in(l: Lang, e: &str, path: &str) -> String {
-    loc!(l,
-        fr: format!("{e} : sauvegarde dans {path}"),
-        en: format!("{e}: backup in {path}"),
-        ja: format!("{e}：バックアップは {path}"),
-        zh: format!("{e}：备份位于 {path}"))
+pub fn failed_backup_in(l: Lang, e: &str, path: Option<&str>) -> String {
+    match path {
+        Some(path) => loc!(l,
+            fr: format!("{e} : sauvegarde dans {path}"),
+            en: format!("{e}: backup in {path}"),
+            ja: format!("{e}：バックアップは {path}"),
+            zh: format!("{e}：备份位于 {path}")),
+        None => format!("{e} ; {}", old_rom_tail(l, None)),
+    }
 }
-pub fn gb_written_ok(l: Lang, rewritten: usize, name: &str) -> String {
-    loc!(l,
-        fr: format!("ROM écrite et vérifiée ({rewritten} secteurs) ; ancienne ROM : backups/{name}"),
-        en: format!("ROM written and verified ({rewritten} sectors); old ROM: backups/{name}"),
-        ja: format!("ROMを書き込み、検証しました（{rewritten}セクター）；旧ROM：backups/{name}"),
-        zh: format!("ROM已写入并验证（{rewritten}个扇区）；旧ROM：backups/{name}"))
+pub fn gb_written_ok(l: Lang, rewritten: usize, name: Option<&str>) -> String {
+    let head = loc!(l,
+        fr: format!("ROM écrite et vérifiée ({rewritten} secteurs)"),
+        en: format!("ROM written and verified ({rewritten} sectors)"),
+        ja: format!("ROMを書き込み、検証しました（{rewritten}セクター）"),
+        zh: format!("ROM已写入并验证（{rewritten}个扇区）"));
+    format!("{head} ; {}", old_rom_tail(l, name))
 }
 
 // ---- save writing ----

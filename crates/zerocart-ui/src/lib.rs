@@ -99,7 +99,9 @@ pub struct ProgressView {
 /// A screen drawn over the tab content: a file picker or a confirmation.
 pub enum Overlay<'a> {
     Picker { title: &'a str, items: &'a [String], selected: usize },
-    Confirm { lines: &'a [String] },
+    /// `raster`: the animation frame of the "no backup" warning (a red raster band with a scroller), `None` when the
+    /// write will be backed up. `skippable`: the screen offers B to go without a backup.
+    Confirm { lines: &'a [String], raster: Option<u32>, skippable: bool },
 }
 
 pub struct View<'a> {
@@ -257,19 +259,63 @@ fn overlay(p: &mut Painter, v: &View, o: &Overlay) {
                 v.banner,
             );
         }
-        Overlay::Confirm { lines } => {
+        Overlay::Confirm { lines, raster, skippable } => {
+            if let Some(frame) = raster {
+                raster_warning(p, lang, *frame);
+            }
             let mut y = 47;
             for (i, l) in lines.iter().enumerate() {
                 y += 1 + p.paragraph(l, 11, i == 0, if i == 0 { ERROR } else { TEXT }, 14, y, SCREEN_W - 28) as i32 * 14;
             }
-            p.footer(
-                &[
-                    ("Y", loc!(lang, fr: "confirmer", en: "confirm", ja: "確定", zh: "确认")),
-                    ("Esc", loc!(lang, fr: "annuler", en: "cancel", ja: "中止", zh: "取消")),
-                ],
-                v.banner,
-            );
+            let mut hints = vec![("Y", loc!(lang, fr: "confirmer", en: "confirm", ja: "確定", zh: "确认"))];
+            if *skippable {
+                hints.push(if raster.is_some() {
+                    ("B", loc!(lang, fr: "avec copie", en: "with backup", ja: "バックアップ有", zh: "含备份"))
+                } else {
+                    ("B", loc!(lang, fr: "sans copie", en: "no backup", ja: "バックアップ無", zh: "不备份"))
+                });
+            }
+            hints.push(("Esc", loc!(lang, fr: "annuler", en: "cancel", ja: "中止", zh: "取消")));
+            p.footer(&hints, v.banner);
         }
+    }
+}
+
+/// The "no backup" warning: red raster bars rolling behind a sine scroller, between the title bar and the text.
+/// `frame` advances every 50 ms.
+fn raster_warning(p: &mut Painter, lang: Lang, frame: u32) {
+    const TOP: i32 = CONTENT_TOP + 2;
+    const H: i32 = 21;
+    let t = frame as f32;
+    for row in 0..H {
+        let r = row as f32;
+        // two sines of different speeds: bars that cross each other
+        let i = (((r * 0.55 + t * 0.21).sin() + (r * 0.23 - t * 0.13).sin()) * 0.25 + 0.5).clamp(0.0, 1.0);
+        let red = (0x38 as f32 + i * (0xE8 - 0x38) as f32) as u32;
+        let rest = (i * i * 0x34 as f32) as u32;
+        p.rect(INSET, TOP + row, INNER_W, 1, (red << 16) | (rest << 8) | rest);
+    }
+    let text = loc!(lang,
+        fr: "SANS SAUVEGARDE  *  À VOS RISQUES ET PÉRILS  *  ",
+        en: "NO BACKUP  *  AT YOUR OWN RISK  *  ",
+        ja: "バックアップなし  *  自己責任で  *  ",
+        zh: "无备份  *  风险自负  *  ");
+    let total = p.fonts.width(text, 13, true).max(1);
+    let mut x = INSET + INNER_W - (frame as i32 * 3) % (total + INNER_W);
+    // the text is drawn character by character: each one rides the sine, and only the characters that fit inside the band show
+    while x < INSET + INNER_W + total {
+        let mut pen = x;
+        for ch in text.chars() {
+            let s = ch.to_string();
+            let w = p.fonts.width(&s, 13, true);
+            if pen >= INSET && pen + w <= INSET + INNER_W {
+                let dy = ((pen as f32 * 0.07 + t * 0.35).sin() * 3.0).round() as i32;
+                p.text(&s, 13, true, 0x000000, pen + 1, TOP + 2 + dy + 1, None);
+                p.text(&s, 13, true, 0xFFFFFF, pen, TOP + 2 + dy, None);
+            }
+            pen += w;
+        }
+        x += total + INNER_W; // a second copy only when the first has left (one pass at a time)
     }
 }
 
@@ -390,7 +436,7 @@ mod tests {
             };
             let lines = vec!["a".to_string(), "b".to_string()];
             for tab in Tab::ALL {
-                for overlay in [None, Some(Overlay::Confirm { lines: &lines })] {
+                for overlay in [None, Some(Overlay::Confirm { lines: &lines, raster: None, skippable: true }), Some(Overlay::Confirm { lines: &lines, raster: Some(7), skippable: true })] {
                     let mut p = Painter { canvas: &mut canvas, fonts: &fonts };
                     render(&mut p, &View { analysis: None, analysis_scroll: 0, analysing: false, overlay, lang, tab, reader: Some(&reader), cart: Some(&cart), scanning: false, action_sel: 0, progress: None, banner: Some(("x", true)) });
                 }

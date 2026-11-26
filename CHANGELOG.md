@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.0.4
+
+- Chisflash: the ChisFlash Beggar Boost firmware (same USB ids as the original one) is recognised by a `55 AA` probe and shown as "Chisflash Boost" with its firmware text; the reader is resynchronised after the probe, nothing is written to the cartridge. It is still driven with the original commands, which that firmware keeps. `zerocart-chis --info` prints which firmware answered.
+- The backup before a ROM flash is optional: `B` on the confirmation screen writes without it, with a red raster-bar scrolling warning ("no backup, at your own risk") and a confirmation line saying the old contents will be lost. The result message says that no backup was made. Saves are always backed up.
+
 ## 1.0.3
 
 - Chisflash, GBA: cartridges whose flash chip needs another programming sequence than the one the reader's firmware sends (crossed data lines, `A9`/`56` unlock) are now programmed word by word with the profile's own sequence. Slow (about 4.5 ms a word, 42 minutes for 2 MiB) but verified on hardware: a 2 MiB cartridge was flashed and read back identical. Cartridges the firmware command suits keep the fast path.

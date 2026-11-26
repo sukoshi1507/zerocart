@@ -45,6 +45,16 @@ pub mod cmd {
     pub const GBC_FRAM_READ: u8 = 0xeb;
 }
 
+/// How long the probe waits for the Boost firmware to answer.
+const PROBE_TIMEOUT: Duration = Duration::from_millis(300);
+
+/// `01` followed by a line that names the ChisFlash Beggar: the firmware text after "FW ", or the whole line.
+fn parse_boost_reply(reply: &[u8]) -> Option<String> {
+    let text = std::str::from_utf8(reply.strip_prefix(&[0x01])?).ok()?.trim();
+    let rest = text.strip_prefix("ChisFlash Beggar")?.trim();
+    Some(rest.strip_prefix("FW").map_or(rest, str::trim).to_string()).filter(|s| !s.is_empty())
+}
+
 /// CRC-16/MODBUS, what the reference client computes (the firmware ignores it).
 pub fn crc16(buf: &[u8]) -> u16 {
     let mut crc = 0xffffu16;
@@ -94,6 +104,8 @@ pub fn find_ports() -> Vec<String> {
 
 pub struct Chis<T: Transport> {
     t: T,
+    /// The firmware text of a ChisFlash Beggar Boost, once [`probe_boost`](Chis::probe_boost) has found one.
+    boost: Option<String>,
 }
 
 impl<T: Transport> Chis<T> {
@@ -102,7 +114,7 @@ impl<T: Transport> Chis<T> {
         t.set_timeout(DEFAULT_TIMEOUT)?;
         t.reset_device()?;
         t.clear_input()?;
-        Ok(Self { t })
+        Ok(Self { t, boost: None })
     }
 
     /// Empties the firmware command buffer (DTR/RTS pulse) and our input. Call it after any error that may have
@@ -110,6 +122,35 @@ impl<T: Transport> Chis<T> {
     pub fn resync(&mut self) -> Result<()> {
         self.t.reset_device()?;
         self.t.clear_input()
+    }
+
+    /// Asks the reader whether it runs the ChisFlash Beggar Boost firmware (same USB ids as the original one, found
+    /// in `ChisLightyear/ChisFlash-Beggar-Boost`): its FlashGBX-style protocol answers the two bytes `55 AA` with
+    /// `01` and a text line ("ChisFlash Beggar FW C15 RC39-STM32"). The original firmware answers nothing: it takes
+    /// the two bytes for the start of a frame of 43605 bytes and keeps waiting, so the reader is resynchronised
+    /// afterwards in every case (that is the only thing the probe leaves behind). Nothing is written to the
+    /// cartridge. Returns the firmware text, and remembers it for [`boost_firmware`](Chis::boost_firmware).
+    pub fn probe_boost(&mut self) -> Result<Option<String>> {
+        self.t.set_timeout(PROBE_TIMEOUT)?;
+        let asked = self.t.write_all(&[0x55, 0xaa]);
+        let mut reply = Vec::new();
+        let mut buf = [0u8; 64];
+        while asked.is_ok() && reply.len() < 128 {
+            match self.t.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => reply.extend_from_slice(&buf[..n]),
+            }
+        }
+        self.t.set_timeout(DEFAULT_TIMEOUT)?;
+        self.resync()?;
+        asked?;
+        self.boost = parse_boost_reply(&reply);
+        Ok(self.boost.clone())
+    }
+
+    /// The firmware text found by [`probe_boost`](Chis::probe_boost) ("C15 RC39-STM32"), `None` for the original one.
+    pub fn boost_firmware(&self) -> Option<&str> {
+        self.boost.as_deref()
     }
 
     pub fn into_inner(self) -> T {
@@ -446,6 +487,59 @@ mod tests {
             self.resets += 1;
             Ok(())
         }
+    }
+
+    /// A transport that answers what it is told to and counts the resynchronisations.
+    struct Probe {
+        answer: Vec<u8>,
+        sent: Vec<u8>,
+        resets: usize,
+    }
+    impl Transport for Probe {
+        fn write_all(&mut self, data: &[u8]) -> Result<()> {
+            self.sent.extend_from_slice(data);
+            Ok(())
+        }
+        fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
+            let n = buf.len().min(self.answer.len());
+            buf[..n].copy_from_slice(&self.answer[..n]);
+            self.answer.drain(..n);
+            Ok(n)
+        }
+        fn set_timeout(&mut self, _: Duration) -> Result<()> { Ok(()) }
+        fn set_baud(&mut self, _: u32) -> Result<()> { Ok(()) }
+        fn clear_input(&mut self) -> Result<()> { Ok(()) }
+        fn reset_device(&mut self) -> Result<()> {
+            self.resets += 1;
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn the_boost_firmware_answers_the_probe_and_the_original_one_does_not() {
+        let boost = Probe { answer: b"\x01ChisFlash Beggar FW C15 RC39-STM32\r\n".to_vec(), sent: vec![], resets: 0 };
+        let mut c = Chis::new(boost).unwrap();
+        let opened = c.into_inner().resets; // Chis::new resets once
+        let boost = Probe { answer: b"\x01ChisFlash Beggar FW C15 RC39-STM32\r\n".to_vec(), sent: vec![], resets: 0 };
+        c = Chis::new(boost).unwrap();
+        assert_eq!(c.probe_boost().unwrap().as_deref(), Some("C15 RC39-STM32"));
+        assert_eq!(c.boost_firmware(), Some("C15 RC39-STM32"));
+        let t = c.into_inner();
+        assert_eq!(t.sent, [0x55, 0xaa], "only the two probe bytes were sent");
+        assert_eq!(t.resets, opened + 1, "the reader is resynchronised after the probe");
+
+        let mut c = Chis::new(Probe { answer: vec![], sent: vec![], resets: 0 }).unwrap();
+        assert_eq!(c.probe_boost().unwrap(), None, "silence: the original firmware");
+        assert_eq!(c.boost_firmware(), None);
+        assert_eq!(c.into_inner().resets, opened + 1, "resynchronised too: the two bytes would break the next frame");
+    }
+
+    #[test]
+    fn an_answer_that_is_not_the_boost_text_is_not_taken_for_it() {
+        for junk in [&b"\x01Something else\r\n"[..], b"ChisFlash Beggar FW x", b"\x01", b"\xaa"] {
+            assert_eq!(parse_boost_reply(junk), None, "{junk:?}");
+        }
+        assert_eq!(parse_boost_reply(b"\x01ChisFlash Beggar\r\n"), None, "a name without a firmware text");
     }
 
     fn pattern(n: usize) -> Vec<u8> {

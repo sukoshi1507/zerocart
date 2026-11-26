@@ -68,6 +68,10 @@ fn run() -> Result<(), String> {
     let port = &ports[0];
     let mut reader = Chis::new(SerialTransport::open(port, BAUD).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
     println!("opened {port} at {BAUD} baud, command buffer reset (DTR/RTS)");
+    match reader.probe_boost().map_err(|e| e.to_string())? {
+        Some(fw) => println!("firmware: ChisFlash Beggar Boost ({fw}): answers the 55 AA probe"),
+        None => println!("firmware: original (no answer to the 55 AA probe)"),
+    }
     let db_dir = PathBuf::from(arg(&args, "--db").unwrap_or_else(|| "configs".into()));
 
     if gba_header || gba_dump.is_some() {

@@ -192,7 +192,10 @@ impl<T: Transport> CartReader for Chis<T> {
         ReaderKind::Chisflash
     }
     fn info(&self, _mode: CartMode) -> ReaderInfo {
-        ReaderInfo { name: "Chisflash".into(), firmware: String::new(), voltage: "" }
+        match self.boost_firmware() {
+            Some(fw) => ReaderInfo { name: "Chisflash Boost".into(), firmware: fw.into(), voltage: "" },
+            None => ReaderInfo { name: "Chisflash".into(), firmware: String::new(), voltage: "" },
+        }
     }
     fn read_header(&mut self, mode: CartMode) -> Result<Vec<u8>> {
         match mode {

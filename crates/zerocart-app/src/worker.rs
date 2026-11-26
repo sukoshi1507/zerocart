@@ -29,7 +29,8 @@ pub enum Cmd {
     /// Identify the flash chip of the inserted cartridge and read its CFI data (no erase, no program).
     Analyze,
     /// Game Boy: write the ROM file to the flash chip (the cartridge is backed up first).
-    FlashRom(PathBuf),
+    /// The ROM to write and whether to back up what it overwrites first (the user can go without).
+    FlashRom(PathBuf, bool),
     /// Game Boy: write the save file to the cartridge RAM (the current save is backed up first, if it is stable).
     WriteSave(PathBuf),
     Quit,
@@ -117,7 +118,12 @@ impl Dev {
             ReaderKind::Chisflash => {
                 let port = chis::find_ports().into_iter().next().ok_or_else(|| msg::not_found(l, "Chisflash"))?;
                 let t = SerialTransport::open(&port, chis::BAUD).map_err(|e| e.to_string())?;
-                Chis::new(t).map(Dev::Chis).map_err(|e| msg::no_answer(l, &e.to_string()))
+                Chis::new(t)
+                    .map(|mut c| {
+                        let _ = c.probe_boost(); // the Boost firmware says so; the original one stays silent
+                        Dev::Chis(c)
+                    })
+                    .map_err(|e| msg::no_answer(l, &e.to_string()))
             }
             other => Err(msg::soon(l, other.label())),
         }
@@ -152,7 +158,7 @@ impl Worker {
         while let Ok(cmd) = rx.recv() {
             self.cancel.store(false, Ordering::SeqCst);
             if let Some(state) = md.as_mut() {
-                if matches!(cmd, Cmd::Detect { .. } | Cmd::ReadRom | Cmd::ReadSave | Cmd::Analyze | Cmd::FlashRom(_) | Cmd::WriteSave(_)) {
+                if matches!(cmd, Cmd::Detect { .. } | Cmd::ReadRom | Cmd::ReadSave | Cmd::Analyze | Cmd::FlashRom(..) | Cmd::WriteSave(_)) {
                     self.md_command(state, cmd, &tx);
                     continue;
                 }
@@ -209,9 +215,9 @@ impl Worker {
                     };
                     let _ = tx.send(Event::Analysis(r));
                 }
-                Cmd::FlashRom(path) => {
+                Cmd::FlashRom(path, backup) => {
                     let r = match (dev.as_mut(), cart.as_ref()) {
-                        (Some(d), Some(c)) => self.flash_rom(d, c, &path, &tx),
+                        (Some(d), Some(c)) => self.flash_rom(d, c, &path, backup, &tx),
                         _ => Err(msg::no_cartridge(self.lang())),
                     };
                     self.after_write(&mut dev, kind, &mut cart, r, &tx);
@@ -283,8 +289,8 @@ impl Worker {
                 let r = self.md_analyze(md);
                 let _ = tx.send(Event::Analysis(r));
             }
-            Cmd::FlashRom(path) => {
-                let r = self.md_flash_rom(md, &path, tx);
+            Cmd::FlashRom(path, backup) => {
+                let r = self.md_flash_rom(md, &path, backup, tx);
                 // the cartridge changed (or the attempt may have): read its header again, then report
                 if let Ok(view) = self.md_detect(md) {
                     let reader = ReaderView { name: "MD Flasher".into(), firmware: String::new(), voltage: "" };
@@ -344,7 +350,7 @@ impl Worker {
 
     /// Writes a ROM file to the flash cartridge: checks, backup of what is overwritten (two reads that must agree),
     /// programming of the sectors that differ, then a full read back. From the programming on it cannot be cancelled.
-    fn md_flash_rom(&self, md: &mut MdState, path: &Path, tx: &Sender<Event>) -> Result<String, String> {
+    fn md_flash_rom(&self, md: &mut MdState, path: &Path, backup: bool, tx: &Sender<Event>) -> Result<String, String> {
         let l = self.lang();
         use zerocart_core::krikzz::UPPER_HALF;
         let cancelled = |e: zerocart_core::Error| if matches!(e, zerocart_core::Error::Cancelled) { msg::cancelled(l) } else { e.to_string() };
@@ -382,7 +388,7 @@ impl Worker {
 
         // 1. Back up what will be overwritten: two reads that must agree.
         let mut passes: Vec<Vec<u8>> = Vec::new();
-        for pass in 0..2usize {
+        for pass in 0..if backup { 2usize } else { 0 } {
             let mut v = Vec::with_capacity(extent);
             md.kit
                 .dump_rom(extent, &mut v, &mut |done| {
@@ -395,15 +401,19 @@ impl Worker {
                 .map_err(cancelled)?;
             passes.push(v);
         }
-        if passes[0] != passes[1] {
+        if backup && passes[0] != passes[1] {
             return Err(msg::reads_differ(l));
         }
-        let backups = self.out_dir.join("backups");
-        std::fs::create_dir_all(&backups).map_err(|e| e.to_string())?;
-        let title = if file_header.title().is_empty() { "megadrive".to_string() } else { sanitize(file_header.title()) };
-        let backup = unique_path(&backups, &format!("{title} avant flash"), "bin");
-        std::fs::write(&backup, &passes[0]).map_err(|e| e.to_string())?;
-        let name = backup.file_name().unwrap_or_default().to_string_lossy().into_owned();
+        let name = if backup {
+            let backups = self.out_dir.join("backups");
+            std::fs::create_dir_all(&backups).map_err(|e| e.to_string())?;
+            let title = if file_header.title().is_empty() { "megadrive".to_string() } else { sanitize(file_header.title()) };
+            let file = unique_path(&backups, &format!("{title} avant flash"), "bin");
+            std::fs::write(&file, &passes[0]).map_err(|e| e.to_string())?;
+            Some(file.file_name().unwrap_or_default().to_string_lossy().into_owned())
+        } else {
+            None
+        };
 
         // 2. Erase and program the sectors that differ. From here on it cannot be cancelled.
         let t1 = Instant::now();
@@ -419,7 +429,7 @@ impl Worker {
         let report = md
             .kit
             .flash_rom(&geo, &image, &mut on_progress, &|| false)
-            .map_err(|e| msg::old_rom_in(l, &e.to_string(), &name))?;
+            .map_err(|e| msg::old_rom_in(l, &e.to_string(), name.as_deref()))?;
 
         // 3. Read everything back.
         let mut after = Vec::with_capacity(extent);
@@ -432,9 +442,9 @@ impl Worker {
         let mut want = image.clone();
         want.resize(extent, 0xFF);
         if after == want {
-            Ok(msg::md_written_ok(l, report.rewritten, report.unchanged, &name))
+            Ok(msg::md_written_ok(l, report.rewritten, report.unchanged, name.as_deref()))
         } else {
-            Err(msg::written_mismatch(l, &name))
+            Err(msg::written_mismatch(l, name.as_deref()))
         }
     }
 
@@ -651,7 +661,7 @@ impl Worker {
 
     /// GBA: erase the whole flash chip and write the ROM (profile chosen from what the chip answers), after a
     /// backup of the whole chip made of two reads that must agree.
-    fn flash_rom_agb(&self, d: &mut Dev, path: &Path, tx: &Sender<Event>) -> Result<String, String> {
+    fn flash_rom_agb(&self, d: &mut Dev, path: &Path, backup: bool, tx: &Sender<Event>) -> Result<String, String> {
         let l = self.lang();
         use zerocart_flashchips::{agb, detect, load_dir, program};
         let rom = std::fs::read(path).map_err(|e| e.to_string())?;
@@ -670,38 +680,43 @@ impl Worker {
         let started = Instant::now();
 
         // 1. Back up the whole chip (it is all erased): two reads that must agree.
-        let mut pass = 0u64;
-        let current = program::read_until_stable(|| {
-            let base = pass * chip as u64;
-            pass += 1;
-            let mut v = Vec::with_capacity(chip);
-            while v.len() < chip {
-                if self.cancel.load(Ordering::SeqCst) {
-                    return Err(msg::cancelled(l));
+        let name = if backup {
+            let mut pass = 0u64;
+            let current = program::read_until_stable(|| {
+                let base = pass * chip as u64;
+                pass += 1;
+                let mut v = Vec::with_capacity(chip);
+                while v.len() < chip {
+                    if self.cancel.load(Ordering::SeqCst) {
+                        return Err(msg::cancelled(l));
+                    }
+                    let n = 0x4000.min(chip - v.len());
+                    let at = v.len() as u32;
+                    v.extend(match d {
+                        Dev::Gbx(g) => g.read_rom(at, n),
+                        Dev::Chis(c) => c.read_rom(at, n.min(chis::CHUNK)),
+                    }
+                    .map_err(|e| e.to_string())?);
+                    let done = base + v.len() as u64;
+                    let _ = tx.send(Event::Progress {
+                        label: msg::backup_chip_progress(l),
+                        done,
+                        total: 2 * chip as u64,
+                        kib_s: done as f32 / 1024.0 / started.elapsed().as_secs_f32().max(0.001),
+                    });
                 }
-                let n = 0x4000.min(chip - v.len());
-                let at = v.len() as u32;
-                v.extend(match d {
-                    Dev::Gbx(g) => g.read_rom(at, n),
-                    Dev::Chis(c) => c.read_rom(at, n.min(chis::CHUNK)),
-                }
-                .map_err(|e| e.to_string())?);
-                let done = base + v.len() as u64;
-                let _ = tx.send(Event::Progress {
-                    label: msg::backup_chip_progress(l),
-                    done,
-                    total: 2 * chip as u64,
-                    kib_s: done as f32 / 1024.0 / started.elapsed().as_secs_f32().max(0.001),
-                });
-            }
-            Ok(v)
-        })?;
-        let backups = self.out_dir.join("backups");
-        std::fs::create_dir_all(&backups).map_err(|e| e.to_string())?;
-        let title = parse_agb(&rom).map(|h| h.title).unwrap_or_default();
-        let backup = unique_path(&backups, &format!("{} puce avant flash", sanitize(&title)), "gba");
-        std::fs::write(&backup, &current).map_err(|e| e.to_string())?;
-        let name = backup.file_name().unwrap_or_default().to_string_lossy().into_owned();
+                Ok(v)
+            })?;
+            let backups = self.out_dir.join("backups");
+            std::fs::create_dir_all(&backups).map_err(|e| e.to_string())?;
+            let title = parse_agb(&rom).map(|h| h.title).unwrap_or_default();
+            let backup = unique_path(&backups, &format!("{} puce avant flash", sanitize(&title)), "gba");
+            std::fs::write(&backup, &current).map_err(|e| e.to_string())?;
+            Some(backup.file_name().unwrap_or_default().to_string_lossy().into_owned())
+
+        } else {
+            None
+        };
 
         // 2. Erase and write. From here on the transfer cannot be cancelled.
         let t1 = Instant::now();
@@ -717,18 +732,18 @@ impl Worker {
             Dev::Gbx(g) => agb::flash_rom(g, profile, &rom, &mut on_progress),
             Dev::Chis(c) => zerocart_flashchips::chis_agb::flash_rom(c, profile, &rom, &mut on_progress),
         }
-        .map_err(|e| msg::old_chip_in(l, &e.to_string(), &name))?;
-        Ok(msg::gba_written_ok(l, report.attempts as usize, report.repaired as usize, &name))
+        .map_err(|e| msg::old_chip_in(l, &e.to_string(), name.as_deref()))?;
+        Ok(msg::gba_written_ok(l, report.attempts as usize, report.repaired as usize, name.as_deref()))
     }
 
-    fn flash_rom(&self, d: &mut Dev, c: &Cart, path: &Path, tx: &Sender<Event>) -> Result<String, String> {
+    fn flash_rom(&self, d: &mut Dev, c: &Cart, path: &Path, backup: bool, tx: &Sender<Event>) -> Result<String, String> {
         let l = self.lang();
         use zerocart_flashchips::{detect, load_dir, program};
         let mapper = match c.dmg {
             Some((Some(m), _)) if m == DmgMapper::Mbc5 => m,
             Some(_) => return Err(msg::only_mbc5(l)),
             None => {
-                return self.flash_rom_agb(d, path, tx);
+                return self.flash_rom_agb(d, path, backup, tx);
             }
         };
         if matches!(d, Dev::Chis(_)) && mapper != DmgMapper::Mbc5 {
@@ -754,24 +769,30 @@ impl Worker {
         let started = Instant::now();
 
         // 1. Back up the cartridge as it is (two reads that must agree).
-        let mut pass = 0u64;
-        let current = program::read_until_stable(|| {
-            let label = msg::backup_cart_progress(l);
-            let mut v = Vec::new();
-            let base = pass * chip as u64;
-            pass += 1;
-            d.r().dump_dmg_rom(mapper, chip, &mut v, &mut |done| {
-                let kib_s = (base as f32 + done as f32) / 1024.0 / started.elapsed().as_secs_f32().max(0.001);
-                let _ = tx.send(Event::Progress { label: label.clone(), done: base + done as u64, total: 2 * chip as u64, kib_s });
-                !self.cancel.load(Ordering::SeqCst)
-            })
-            .map_err(|e| if matches!(e, zerocart_core::Error::Cancelled) { msg::cancelled(l) } else { e.to_string() })?;
-            Ok(v)
-        })?;
-        let backups = self.out_dir.join("backups");
-        std::fs::create_dir_all(&backups).map_err(|e| e.to_string())?;
-        let backup = unique_path(&backups, &format!("{} avant flash", sanitize(&c.title)), "gb");
-        std::fs::write(&backup, &current).map_err(|e| e.to_string())?;
+        let backup_file = if backup {
+            let mut pass = 0u64;
+            let current = program::read_until_stable(|| {
+                let label = msg::backup_cart_progress(l);
+                let mut v = Vec::new();
+                let base = pass * chip as u64;
+                pass += 1;
+                d.r().dump_dmg_rom(mapper, chip, &mut v, &mut |done| {
+                    let kib_s = (base as f32 + done as f32) / 1024.0 / started.elapsed().as_secs_f32().max(0.001);
+                    let _ = tx.send(Event::Progress { label: label.clone(), done: base + done as u64, total: 2 * chip as u64, kib_s });
+                    !self.cancel.load(Ordering::SeqCst)
+                })
+                .map_err(|e| if matches!(e, zerocart_core::Error::Cancelled) { msg::cancelled(l) } else { e.to_string() })?;
+                Ok(v)
+            })?;
+            let backups = self.out_dir.join("backups");
+            std::fs::create_dir_all(&backups).map_err(|e| e.to_string())?;
+            let file = unique_path(&backups, &format!("{} avant flash", sanitize(&c.title)), "gb");
+            std::fs::write(&file, &current).map_err(|e| e.to_string())?;
+            Some(file)
+
+        } else {
+            None
+        };
 
         // 2. Write, only the sectors that differ. From here on the transfer cannot be cancelled.
         let sectors = cfi.sectors();
@@ -789,20 +810,20 @@ impl Worker {
             Dev::Gbx(g) => program::flash_rom(g, profile, &sectors, &rom, &mut on_progress, &|| false),
             Dev::Chis(c) => zerocart_flashchips::chis_gb::flash_rom(c, profile, &sectors, &rom, &mut on_progress, &|| false),
         }
-        .map_err(|e| msg::failed_backup_in(l, &e.to_string(), &backup.display().to_string()))?;
+        .map_err(|e| msg::failed_backup_in(l, &e.to_string(), backup_file.as_ref().map(|f| f.display().to_string()).as_deref()))?;
 
         // 3. Verify. A read of a Game Boy cartridge can be wrong now and then (a burst of bad bytes that is not in the
         // cartridge: seen on hardware, the next read was perfect). Only a difference that shows up in two reads in a row
         // is a failed write; one wrong read is read again.
-        let name = backup.file_name().unwrap_or_default().to_string_lossy().into_owned();
+        let name = backup_file.as_ref().map(|f| f.file_name().unwrap_or_default().to_string_lossy().into_owned());
         for _ in 0..2 {
             let mut after = Vec::new();
             d.r().dump_dmg_rom(mapper, rom.len(), &mut after, &mut |_| true).map_err(|e| e.to_string())?;
             if after == rom {
-                return Ok(msg::gb_written_ok(l, report.rewritten as usize, &name));
+                return Ok(msg::gb_written_ok(l, report.rewritten as usize, name.as_deref()));
             }
         }
-        Err(msg::written_mismatch(l, &name))
+        Err(msg::written_mismatch(l, name.as_deref()))
     }
 
     fn write_save(&self, d: &mut Dev, c: &Cart, path: &Path, tx: &Sender<Event>) -> Result<String, String> {

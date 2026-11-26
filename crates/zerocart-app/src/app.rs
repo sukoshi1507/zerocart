@@ -16,7 +16,8 @@ use zerocart_ui::{loc, Lang};
 enum Flow {
     None,
     Picking { action: Action, files: Vec<PathBuf>, selected: usize },
-    Confirming { action: Action, file: PathBuf },
+    /// `no_backup`: the user chose to write without backing up what is overwritten (B on the confirmation).
+    Confirming { action: Action, file: PathBuf, no_backup: bool },
 }
 
 /// Where the user is: the start screens, then the tabs of the chosen system.
@@ -69,6 +70,9 @@ pub struct App {
     flow: Flow,
     picker_items: Vec<String>,
     confirm_lines: Vec<String>,
+    /// Animation of the "no backup" warning: when it started and the frame last drawn.
+    raster_since: Option<Instant>,
+    raster_frame: u32,
     /// The cartridge being written is a GBA one (changes the wording of the confirmation).
     flow_gba: bool,
     /// The ROM being written is for a Mega Drive cartridge (changes the confirmation text).
@@ -85,7 +89,7 @@ impl App {
             splash_since: None, last_scan: None, scanner: Box::new(readers::scan),
             lang, lang_cell: None, tab: Tab::Info, action_sel: 0, reader: None, cart: None, scanning: false, progress: None,
             banner: None, want_quit: false, dirty: true, tx, cancel, out_dir: out_dir.clone(), flow: Flow::None,
-            picker_items: Vec::new(), confirm_lines: Vec::new(), flow_gba: false, flow_md: false,
+            picker_items: Vec::new(), confirm_lines: Vec::new(), raster_since: None, raster_frame: 0, flow_gba: false, flow_md: false,
             analysis: None, analysis_scroll: 0, analysing: false,
             share: None, share_starter: crate::share::default_starter(out_dir.clone()),
         }
@@ -129,6 +133,16 @@ impl App {
 
     /// Called every loop turn: ends the splash, and refreshes the "plugged in" check while the readers are shown.
     pub fn tick(&mut self, now: Instant) {
+        if matches!(self.flow, Flow::Confirming { no_backup: true, .. }) {
+            let since = *self.raster_since.get_or_insert(now);
+            let frame = (now.duration_since(since).as_millis() / 50) as u32;
+            if frame != self.raster_frame {
+                self.raster_frame = frame;
+                self.dirty = true;
+            }
+        } else {
+            self.raster_since = None;
+        }
         match self.stage {
             Stage::Splash => {
                 let since = *self.splash_since.get_or_insert(now);
@@ -409,6 +423,15 @@ impl App {
         });
     }
 
+    /// The text of the confirmation: with the backup line, or (`backup` false) the warning that none is made.
+    fn confirm_text_for(&self, action: Action, file: &std::path::Path, backup: bool) -> Vec<String> {
+        if self.flow_md {
+            confirm_text_md(file, backup, self.lang)
+        } else {
+            confirm_text(action, file, self.flow_gba, backup, self.lang)
+        }
+    }
+
     fn flow_key(&mut self, key: Key) {
         let flow = std::mem::replace(&mut self.flow, Flow::None);
         self.flow = match (flow, key) {
@@ -421,16 +444,22 @@ impl App {
             }
             (Flow::Picking { action, files, selected }, Key::Enter) => {
                 let file = files[selected].clone();
-                self.confirm_lines =
-                    if self.flow_md { confirm_text_md(&file, self.lang) } else { confirm_text(action, &file, self.flow_gba, self.lang) };
-                Flow::Confirming { action, file }
+                self.confirm_lines = self.confirm_text_for(action, &file, true);
+                Flow::Confirming { action, file, no_backup: false }
             }
             (f @ Flow::Picking { .. }, _) => f,
             (Flow::Confirming { .. }, Key::Esc) => Flow::None,
-            (Flow::Confirming { action, file }, Key::Char('y') | Key::Char('Y')) => {
+            // B: write without backing up what is overwritten (only for a ROM), and B again to go back to the backup (X is an arrow)
+            (Flow::Confirming { action: action @ Action::FlashRom, file, no_backup }, Key::Char('b') | Key::Char('B')) => {
+                self.raster_since = None;
+                self.raster_frame = 0;
+                self.confirm_lines = self.confirm_text_for(action, &file, no_backup);
+                Flow::Confirming { action, file, no_backup: !no_backup }
+            }
+            (Flow::Confirming { action, file, no_backup }, Key::Char('y') | Key::Char('Y')) => {
                 self.progress = Some(ProgressView { label: action.label(self.lang).into(), done: 0, total: 0, kib_s: 0.0 });
                 let _ = self.tx.send(match action {
-                    Action::FlashRom => Cmd::FlashRom(file),
+                    Action::FlashRom => Cmd::FlashRom(file, !no_backup),
                     _ => Cmd::WriteSave(file),
                 });
                 Flow::None
@@ -542,7 +571,11 @@ impl App {
                 items: &self.picker_items,
                 selected: *selected,
             }),
-            Flow::Confirming { .. } => Some(Overlay::Confirm { lines: &self.confirm_lines }),
+            Flow::Confirming { action, no_backup, .. } => Some(Overlay::Confirm {
+                lines: &self.confirm_lines,
+                raster: no_backup.then_some(self.raster_frame),
+                skippable: *action == Action::FlashRom,
+            }),
         };
         View {
             overlay,
@@ -594,7 +627,7 @@ fn describe(p: &std::path::Path) -> String {
     format!("{}  ({} KiB)", p.file_name().unwrap_or_default().to_string_lossy(), size / 1024)
 }
 
-fn confirm_text_md(file: &std::path::Path, lang: Lang) -> Vec<String> {
+fn confirm_text_md(file: &std::path::Path, backup: bool, lang: Lang) -> Vec<String> {
     let name = file.file_name().unwrap_or_default().to_string_lossy().into_owned();
     let size = std::fs::metadata(file).map(|m| m.len()).unwrap_or(0);
     let kib = size / 1024;
@@ -611,6 +644,9 @@ fn confirm_text_md(file: &std::path::Path, lang: Lang) -> Vec<String> {
             ja: "旧ROMはまずbackupsに保存されます。書き込み中は抜かないでください。".to_string(),
             zh: "旧ROM会先备份到backups。写入期间请勿拔出。".to_string()),
     ];
+    if !backup {
+        v[2] = no_backup_line(lang);
+    }
     if size > 4 << 20 {
         v.push(
             loc!(lang,
@@ -624,10 +660,10 @@ fn confirm_text_md(file: &std::path::Path, lang: Lang) -> Vec<String> {
     v
 }
 
-fn confirm_text(action: Action, file: &std::path::Path, gba: bool, lang: Lang) -> Vec<String> {
+fn confirm_text(action: Action, file: &std::path::Path, gba: bool, backup: bool, lang: Lang) -> Vec<String> {
     let name = file.file_name().unwrap_or_default().to_string_lossy().into_owned();
     let write = loc!(lang, fr: format!("Écrire : {name}"), en: format!("Write: {name}"), ja: format!("書き込み：{name}"), zh: format!("写入：{name}"));
-    match action {
+    let mut v = match action {
         Action::FlashRom if gba => vec![
             loc!(lang,
                 fr: "ATTENTION : TOUTE la puce flash de la cartouche va être effacée".into(),
@@ -667,7 +703,20 @@ fn confirm_text(action: Action, file: &std::path::Path, gba: bool, lang: Lang) -
                 ja: "旧セーブは読み取れればbackupsに保存されます。".into(),
                 zh: "旧存档若可读取，会保留在backups中。".into()),
         ],
+    };
+    if !backup && action == Action::FlashRom {
+        v[2] = no_backup_line(lang);
     }
+    v
+}
+
+/// What the confirmation says when the user chose to write without a backup.
+fn no_backup_line(lang: Lang) -> String {
+    loc!(lang,
+        fr: "AUCUNE sauvegarde : l'ancien contenu sera perdu. Ne pas débrancher pendant l'écriture.".into(),
+        en: "NO backup: the old contents will be lost. Do not unplug while writing.".into(),
+        ja: "バックアップなし：旧内容は失われます。書き込み中は抜かないでください。".into(),
+        zh: "不备份：旧内容将丢失。写入期间请勿拔出。".into())
 }
 
 #[cfg(test)]
@@ -961,7 +1010,7 @@ mod tests {
         down(&mut a, Key::Enter);
         assert!(rx.try_recv().is_err(), "Enter does not confirm a write");
         down(&mut a, Key::Char('y'));
-        assert!(matches!(rx.try_recv().unwrap(), Cmd::FlashRom(p) if p.ends_with("jeu.bin")));
+        assert!(matches!(rx.try_recv().unwrap(), Cmd::FlashRom(p, true) if p.ends_with("jeu.bin")));
         let _ = std::fs::remove_dir_all(&dir);
         a.on_event(Event::Finished(Ok("ok".into())));
         down(&mut a, Key::Esc);
@@ -1148,7 +1197,7 @@ mod tests {
         assert!(rx.try_recv().is_err());
         down(&mut a, Key::Char('y'));
         match rx.try_recv().unwrap() {
-            Cmd::FlashRom(p) => assert!(p.ends_with("game.gb")),
+            Cmd::FlashRom(p, true) => assert!(p.ends_with("game.gb")),
             other => panic!("unexpected {other:?}"),
         }
         assert!(a.progress.is_some());
@@ -1186,7 +1235,62 @@ mod tests {
         assert!(a.confirm_lines[0].contains("TOUTE la puce"));
         assert!(rx.try_recv().is_err(), "nothing is sent before the confirmation");
         down(&mut a, Key::Char('y'));
-        assert!(matches!(rx.try_recv().unwrap(), Cmd::FlashRom(_)));
+        assert!(matches!(rx.try_recv().unwrap(), Cmd::FlashRom(..)));
+    }
+
+    /// A GBA application on the confirmation of a ROM flash.
+    fn confirming_gba_flash() -> (App, Receiver<Cmd>) {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("g.gba"), vec![0u8; 16]).unwrap();
+        let (mut a, rx) = app();
+        rx.try_recv().unwrap();
+        a.on_event(Event::Detected(Ok((reader(), Some(cart())))));
+        a.out_dir = d.keep();
+        a.tab = Tab::Actions;
+        a.action_sel = 3;
+        down(&mut a, Key::Enter);
+        down(&mut a, Key::Enter);
+        (a, rx)
+    }
+
+    #[test]
+    fn a_rom_is_backed_up_unless_the_user_asks_for_b_and_b_again_puts_the_backup_back() {
+        let (mut a, rx) = confirming_gba_flash();
+        assert!(a.confirm_lines[2].contains("sauvegardée"));
+        down(&mut a, Key::Char('b'));
+        assert!(matches!(a.flow, Flow::Confirming { no_backup: true, .. }));
+        assert!(a.confirm_lines[2].contains("AUCUNE sauvegarde"), "{:?}", a.confirm_lines);
+        assert!(rx.try_recv().is_err(), "B alone writes nothing");
+        down(&mut a, Key::Char('b'));
+        assert!(a.confirm_lines[2].contains("sauvegardée"));
+        down(&mut a, Key::Char('y'));
+        assert!(matches!(rx.try_recv().unwrap(), Cmd::FlashRom(_, true)), "the default keeps the backup");
+    }
+
+    #[test]
+    fn without_a_backup_the_command_says_so_and_the_warning_animates() {
+        let (mut a, rx) = confirming_gba_flash();
+        down(&mut a, Key::Char('b'));
+        a.take_dirty();
+        let t0 = Instant::now();
+        a.tick(t0);
+        a.take_dirty();
+        a.tick(t0 + Duration::from_millis(120));
+        assert!(a.take_dirty(), "the raster band is redrawn");
+        down(&mut a, Key::Char('y'));
+        assert!(matches!(rx.try_recv().unwrap(), Cmd::FlashRom(_, false)));
+    }
+
+    #[test]
+    fn a_save_write_has_no_way_to_skip_its_backup() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("a.sav"), vec![0u8; 0x8000]).unwrap();
+        let (mut a, _rx) = app_in(d.path());
+        a.action_sel = 2;
+        down(&mut a, Key::Enter);
+        down(&mut a, Key::Enter);
+        down(&mut a, Key::Char('b'));
+        assert!(matches!(a.flow, Flow::Confirming { no_backup: false, .. }));
     }
 
     #[test]

@@ -138,7 +138,7 @@ fn demo_png(args: &[String], out: &str, lang: Lang, fonts: &Fonts) -> Result<(),
     ];
     let overlay = match arg(args, "--overlay").as_deref() {
         Some("picker") => Some(zerocart_ui::Overlay::Picker { title: "ROM à écrire sur la cartouche :", items: &items, selected: 1 }),
-        Some("confirm") => Some(zerocart_ui::Overlay::Confirm { lines: &lines }),
+        Some("confirm") => Some(zerocart_ui::Overlay::Confirm { lines: &lines, raster: arg(args, "--raster").and_then(|n| n.parse().ok()), skippable: true }),
         _ => None,
     };
     let analysis: Vec<String> = [
