@@ -666,9 +666,6 @@ impl Worker {
         }
         let idx = agb::choose_profile(&mut *d.agb_bus(), &profiles, &found.matches, &found.answered)?;
         let profile = &profiles[idx];
-        if matches!(d, Dev::Chis(_)) {
-            zerocart_flashchips::chis_agb::can_program(profile)?; // nothing has been touched yet
-        }
         let chip = cfi.device_size as usize;
         let started = Instant::now();
 

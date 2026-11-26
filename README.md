@@ -13,7 +13,7 @@ One reader at a time in the CardputerZero USB port; ZeroCart finds out which one
 | Reader | For | Notes |
 |---|---|---|
 | **GBFlash** (tested: v1.3, firmware L15) / GBxCart RW | Game Boy, Game Boy Color, Game Boy Advance | sets the voltage itself (5 V / 3.3 V). GBxCart RW should work through the same protocol but has not been tried. |
-| **Chisflash** (original firmware, USB 0483:0721) | Game Boy, Game Boy Color, Game Boy Advance | cannot cut the power: saves are flagged "not verified". GBA ROM flashing with it (new in 1.0.2) has not been tried on real hardware yet: use a cartridge you can afford to lose first. |
+| **Chisflash** (original firmware, USB 0483:0721) | Game Boy, Game Boy Color, Game Boy Advance | cannot cut the power: saves are flagged "not verified". GBA ROM flashing with it (new in 1.0.2) was tried on one cartridge (Vampire Killer, 2 MiB, crossed data lines: 42 minutes). Use a cartridge you can afford to lose first. |
 | **MD Flasher** (Krikzz FlashKit MD, FTDI 0403:6001) | Mega Drive | |
 
 The user must be allowed to open the serial port (group `dialout`, the default user is in it).
@@ -84,6 +84,7 @@ saves (`.sav`) you want to write in `~/zerocart`; dumps are written there too.
   (GBFlash; a dry run unless `--yes`).
 - `zerocart-chis --info | --gba-header | --gba-dump FILE | --gb-header | --gb-dump FILE` (Chisflash, read only).
 - `zerocart-chis-flash --flash-rom --rom FILE --backup BACKUP.gb [--yes]` (Chisflash, Game Boy MBC5).
+- `zerocart-chis-gba-flash --rom FILE --backup BACKUP.gba [--yes]` (Chisflash, GBA: backup, erase, program, verify; a dry run without `--yes`).
 - `zerocart-md --info | --header | --dump FILE | --save FILE | --identify | --flash FILE --backup OUT [--yes] [--word-by-word]`
 - `zerocart-share --list | --send TARGET FILE... | --text TARGET MESSAGE | --serve [--accept-all]` : ZeroSend (LocalSend) without the screen, to script it or test it (`--accept-all` skips the question: only on a network you trust)
   (MD Flasher; `--flash` is a dry run unless `--yes`).

@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.0.3
+
+- Chisflash, GBA: cartridges whose flash chip needs another programming sequence than the one the reader's firmware sends (crossed data lines, `A9`/`56` unlock) are now programmed word by word with the profile's own sequence. Slow (about 4.5 ms a word, 42 minutes for 2 MiB) but verified on hardware: a 2 MiB cartridge was flashed and read back identical. Cartridges the firmware command suits keep the fast path.
+- New `zerocart-chis-gba-flash` tool (backup, erase, program, verify; a dry run without `--yes`).
+
 ## 1.0.2
 
 - Chisflash: flashing a GBA ROM is now supported. Backup of the whole chip from two agreeing reads, chip erase with the profile's commands, programming with the reader's own command, read back and repair. Chips whose programming sequence is not the one the firmware sends are refused before anything is erased. New and not yet tried on real hardware: use a cartridge you can afford to lose first.
