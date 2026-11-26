@@ -7,7 +7,7 @@
     "summary": "Read and flash Game Boy, GBA and Mega Drive cartridges from the CardputerZero",
     "description": "ZeroCart turns the CardputerZero into an all-in-one cartridge reader and flasher.\n\n- Systems: Game Boy, Game Boy Color, Game Boy Advance and Mega Drive. The first screen sets the mode and the voltage.\n- Readers: GBFlash / GBxCart RW, Chisflash (original firmware) and the MD Flasher (Krikzz FlashKit MD), found automatically over USB.\n- Read ROMs (checked against the FlashGBX database or the header checksum) and saves; a Game Boy read that comes back wrong is put right on its own.\n- Flash a ROM on rewritable cartridges and write saves. Everything that changes a cartridge asks for a file and a confirmation, backs up what it overwrites from two agreeing reads, and reads the result back.\n- Built-in ZeroSend: LocalSend file sharing to send dumps and saves to a phone or a computer, or receive files, with an accept/decline on screen.\n- Famicom-style interface in French, English, Japanese and Simplified Chinese.\n\nYou need one of the readers above plugged into the USB port. The Game Boy and GBA protocol and chip databases come from FlashGBX by Lesserkuma.",
     "categories": [
-      "Utilities",
+      "System Tools",
       "Hardware & IoT"
     ],
     "screenshots": [
