@@ -741,7 +741,7 @@ dependencies = [
 
 [[package]]
 name = "zerocart-app"
-version = "1.0.4"
+version = "1.0.5"
 dependencies = [
  "png",
  "tempfile",
@@ -753,7 +753,7 @@ dependencies = [
 
 [[package]]
 name = "zerocart-core"
-version = "1.0.4"
+version = "1.0.5"
 dependencies = [
  "crc32fast",
  "serde",
@@ -765,7 +765,7 @@ dependencies = [
 
 [[package]]
 name = "zerocart-flashchips"
-version = "1.0.4"
+version = "1.0.5"
 dependencies = [
  "serde_json",
  "zerocart-core",
@@ -773,7 +773,7 @@ dependencies = [
 
 [[package]]
 name = "zerocart-send"
-version = "1.0.4"
+version = "1.0.5"
 dependencies = [
  "getrandom 0.2.17",
  "rcgen",
@@ -786,7 +786,7 @@ dependencies = [
 
 [[package]]
 name = "zerocart-ui"
-version = "1.0.4"
+version = "1.0.5"
 dependencies = [
  "ab_glyph",
  "memmap2",

@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.0.5
+
+- New icon: the ZeroStack family logo (neon cartridge with the slashed zero, pixel-notched tile), shared with ZeroTag and ZeroTier. Source in `assets/logo/zerocart.svg`, rendered by `packaging/make_icon.py`.
+
 ## 1.0.4
 
 - Chisflash: the ChisFlash Beggar Boost firmware (same USB ids as the original one) is recognised by a `55 AA` probe and shown as "Chisflash Boost" with its firmware text; the reader is resynchronised after the probe, nothing is written to the cartridge. It is still driven with the original commands, which that firmware keeps. `zerocart-chis --info` prints which firmware answered.
