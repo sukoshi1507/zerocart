@@ -115,11 +115,11 @@ impl Backend for Service {
 /// Starts ZeroSend: given the user interface of the received files and a "the list of devices changed" callback.
 pub type Starter = Box<dyn Fn(Arc<dyn Ui>, Arc<dyn Fn() + Send + Sync>) -> Result<Arc<dyn Backend>, String> + Send>;
 
-/// The real ZeroSend: certificate in `~/.config/zerocart/send`, received files in `~/Downloads`.
-pub fn default_starter() -> Starter {
-    Box::new(|ui, on_change| {
+/// The real ZeroSend: certificate in `~/.config/zerocart/send`, received files in the ZeroCart folder (`~/zerocart`).
+pub fn default_starter(receive_dir: PathBuf) -> Starter {
+    Box::new(move |ui, on_change| {
         let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_else(|| "/tmp".into()));
-        let config = Config::new("ZeroCart", home.join(".config/zerocart/send"), home.join("Downloads"));
+        let config = Config::new("ZeroCart", home.join(".config/zerocart/send"), receive_dir.clone());
         let port = config.bind.port();
         Service::start(config, ui, on_change)
             .map(|s| Arc::new(s) as Arc<dyn Backend>)
@@ -274,7 +274,7 @@ impl Share {
                     let more = files.len() - 3;
                     lines.push(loc!(l, fr: format!("... et {more} autres"), en: format!("... and {more} more"), ja: format!("...ほか{more}件"), zh: format!("...另有{more}个")));
                 }
-                lines.push(loc!(l, fr: "Enregistré dans ~/Downloads.", en: "Saved in ~/Downloads.", ja: "~/Downloads に保存されます。", zh: "将保存到 ~/Downloads。").to_string());
+                lines.push(loc!(l, fr: "Enregistré dans ~/zerocart.", en: "Saved in ~/zerocart.", ja: "~/zerocart に保存されます。", zh: "将保存到 ~/zerocart。").to_string());
                 self.incoming = Some(Incoming { lines, answer });
             }
             ShareEvent::Message { from, text } => {

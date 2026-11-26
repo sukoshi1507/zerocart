@@ -84,10 +84,10 @@ impl App {
             stage: Stage::Splash, system: System::Gb, system_sel: 0, reader_sel: 0, reader_moved: false, detected: Vec::new(), connecting: false,
             splash_since: None, last_scan: None, scanner: Box::new(readers::scan),
             lang, lang_cell: None, tab: Tab::Info, action_sel: 0, reader: None, cart: None, scanning: false, progress: None,
-            banner: None, want_quit: false, dirty: true, tx, cancel, out_dir, flow: Flow::None,
+            banner: None, want_quit: false, dirty: true, tx, cancel, out_dir: out_dir.clone(), flow: Flow::None,
             picker_items: Vec::new(), confirm_lines: Vec::new(), flow_gba: false, flow_md: false,
             analysis: None, analysis_scroll: 0, analysing: false,
-            share: None, share_starter: crate::share::default_starter(),
+            share: None, share_starter: crate::share::default_starter(out_dir.clone()),
         }
     }
 
@@ -386,13 +386,13 @@ impl App {
             self.flow_md = md && action == Action::FlashRom; // a save has the same confirmation on every system
             let files = list_files(&self.out_dir, exts);
             if files.is_empty() {
-                let (ext, dir) = (exts[0], self.out_dir.display());
+                let (ext, dir) = (exts.iter().map(|e| format!(".{e}")).collect::<Vec<_>>().join(" / "), self.out_dir.display());
                 self.banner = Some((
                     loc!(lang,
-                        fr: format!("Aucun fichier .{ext} dans {dir}"),
-                        en: format!("No .{ext} file in {dir}"),
-                        ja: format!("{dir} に .{ext} ファイルがありません"),
-                        zh: format!("{dir} 中没有 .{ext} 文件"))
+                        fr: format!("Aucun fichier {ext} dans {dir}"),
+                        en: format!("No {ext} file in {dir}"),
+                        ja: format!("{dir} に {ext} ファイルがありません"),
+                        zh: format!("{dir} 中没有 {ext} 文件"))
                     ,
                     true,
                 ));

@@ -49,7 +49,7 @@ and the Pocket Camera.
 `S` on the system screen opens ZeroSend, a Rust implementation of the LocalSend v2 protocol (TLS with a certificate
 made on first use in `~/.config/zerocart/send`). The other devices on the Wi-Fi appear in a list (`A` adds one by
 its address, `R` looks again); `Enter` picks a dump or a save from `~/zerocart` and sends it after a confirmation on
-`Y`. What others send you is accepted or declined with `Y` / `N` and saved in `~/Downloads`. The port is 53317;
+`Y`. What others send you is accepted or declined with `Y` / `N` and saved in `~/zerocart` (where the flash screens look for ROMs). The port is 53317;
 LocalSend must not be running on the same machine.
 
 ## Languages

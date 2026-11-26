@@ -64,7 +64,7 @@ fn demo_share(which: &str, out: &str, lang: Lang, fonts: &Fonts) -> Result<(), S
     let pr = zerocart_ui::ProgressView { label: "MEGA PANG.bin".into(), done: 600 * 1024, total: 1024 * 1024, kib_s: 0.0 };
     let files: Vec<String> = ["MEGA PANG.bin  (1.0 Mo)", "Mr. Driller 2.gba  (4.0 Mo)", "backups/Mr. Driller 2 (non vérifiée).sav  (32 Ko)"].iter().map(|s| s.to_string()).collect();
     let confirm = vec!["Envoyer ce fichier à Pixel 8 ?".to_string(), "MEGA PANG.bin (1.0 Mo)".to_string(), "Le fichier quitte l'appareil et passe par le réseau local.".to_string()];
-    let incoming = vec!["Pixel 8 veut vous envoyer :".to_string(), "rom.gba (4.0 Mo)".to_string(), "Enregistré dans ~/Downloads.".to_string()];
+    let incoming = vec!["Pixel 8 veut vous envoyer :".to_string(), "rom.gba (4.0 Mo)".to_string(), "Enregistré dans ~/zerocart.".to_string()];
     let none: &[ShareRow] = &[];
     let body = match which {
         "none" => ShareBody::Devices { rows: none, selected: 0, discovering: true, port: 53317, receiving: None },

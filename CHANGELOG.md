@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.0.1
+
+- ZeroSend now saves the files it receives in `~/zerocart` (the folder the flash screens look in) instead of `~/Downloads`: a ROM sent from a phone or a computer is listed at once.
+- The "no file" message of the flash screens names every accepted extension (`.gb / .gbc`, `.bin / .md / .gen`, ...), so a Game Boy Color `.gbc` ROM is no longer thought to be refused.
+
 ## 1.0.0
 
 First release of ZeroCart: an all-in-one cartridge reader and flasher for the M5Stack CardputerZero.
