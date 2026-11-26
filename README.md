@@ -13,7 +13,7 @@ One reader at a time in the CardputerZero USB port; ZeroCart finds out which one
 | Reader | For | Notes |
 |---|---|---|
 | **GBFlash** (tested: v1.3, firmware L15) / GBxCart RW | Game Boy, Game Boy Color, Game Boy Advance | sets the voltage itself (5 V / 3.3 V). GBxCart RW should work through the same protocol but has not been tried. |
-| **Chisflash** (original firmware, USB 0483:0721) | Game Boy, Game Boy Color, Game Boy Advance | cannot cut the power: saves are flagged "not verified". Flashing a GBA ROM with it is not supported yet. |
+| **Chisflash** (original firmware, USB 0483:0721) | Game Boy, Game Boy Color, Game Boy Advance | cannot cut the power: saves are flagged "not verified". GBA ROM flashing with it (new in 1.0.2) has not been tried on real hardware yet: use a cartridge you can afford to lose first. |
 | **MD Flasher** (Krikzz FlashKit MD, FTDI 0403:6001) | Mega Drive | |
 
 The user must be allowed to open the serial port (group `dialout`, the default user is in it).

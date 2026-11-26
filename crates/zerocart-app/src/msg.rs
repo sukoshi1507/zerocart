@@ -434,14 +434,6 @@ pub fn only_mbc5(l: Lang) -> String {
         zh: "仅支持烧录MBC5卡带")
     .into()
 }
-pub fn chis_gba_write_unsupported(l: Lang) -> String {
-    loc!(l,
-        fr: "écriture d'une ROM GBA avec le Chisflash : pas encore gérée",
-        en: "writing a GBA ROM with the Chisflash: not supported yet",
-        ja: "ChisflashでのGBA ROM書き込みは未対応です",
-        zh: "暂不支持用Chisflash写入GBA ROM")
-    .into()
-}
 pub fn gb_bad_size(l: Lang) -> String {
     loc!(l,
         fr: "taille de fichier invalide pour une ROM Game Boy",

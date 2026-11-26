@@ -1,6 +1,7 @@
 //! Flash cartridge profiles (the `fc_*.txt` files of FlashGBX) and chip detection.
 pub mod agb;
 pub mod cfi;
+pub mod chis_agb;
 pub mod chis_gb;
 pub mod detect;
 pub mod profile;

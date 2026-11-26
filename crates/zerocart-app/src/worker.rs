@@ -97,6 +97,14 @@ impl Dev {
         }
     }
 
+    /// The cartridge bus as the flash profiles of GBA cartridges see it (the Chisflash needs its own ROM-bus commands).
+    fn agb_bus(&mut self) -> Box<dyn FlashBus + '_> {
+        match self {
+            Dev::Gbx(d) => Box::new(d),
+            Dev::Chis(d) => Box::new(zerocart_flashchips::chis_agb::AgbBus(d)),
+        }
+    }
+
     /// The reader of this kind (the Krikzz Mega Drive programmer is not a cartridge reader of this application yet).
     fn open_kind(kind: zerocart_core::ReaderKind, l: Lang) -> Result<Dev, String> {
         use zerocart_core::ReaderKind;
@@ -583,7 +591,7 @@ impl Worker {
         if profiles.is_empty() {
             return Err(msg::profiles_missing(l, &self.db_dir.display().to_string()));
         }
-        let found = detect(d.bus(), &profiles, if agb_mode { "AGB" } else { "DMG" })?;
+        let found = if agb_mode { detect(&mut *d.agb_bus(), &profiles, "AGB")? } else { detect(d.bus(), &profiles, "DMG")? };
         let volts = matches!(d, Dev::Gbx(_));
         let mut lines = vec![msg::mode_line(l, agb_mode, volts)];
         if found.id_lines.is_empty() && found.cfi.is_none() {
@@ -596,7 +604,7 @@ impl Worker {
         match found.matches.as_slice() {
             [] => {
                 let probable = if agb_mode {
-                    agb::choose_profile(d.bus(), &profiles, &found.matches, &found.answered).ok()
+                    agb::choose_profile(&mut *d.agb_bus(), &profiles, &found.matches, &found.answered).ok()
                 } else {
                     None
                 };
@@ -643,7 +651,7 @@ impl Worker {
 
     /// GBA: erase the whole flash chip and write the ROM (profile chosen from what the chip answers), after a
     /// backup of the whole chip made of two reads that must agree.
-    fn flash_rom_agb(&self, d: &mut GbxCart<SerialTransport>, path: &Path, tx: &Sender<Event>) -> Result<String, String> {
+    fn flash_rom_agb(&self, d: &mut Dev, path: &Path, tx: &Sender<Event>) -> Result<String, String> {
         let l = self.lang();
         use zerocart_flashchips::{agb, detect, load_dir, program};
         let rom = std::fs::read(path).map_err(|e| e.to_string())?;
@@ -651,13 +659,16 @@ impl Worker {
             return Err(msg::gba_bad_file(l));
         }
         let (profiles, _) = load_dir(&self.db_dir);
-        let found = detect(d, &profiles, "AGB")?;
+        let found = detect(&mut *d.agb_bus(), &profiles, "AGB")?;
         let cfi = found.cfi.as_ref().ok_or_else(|| msg::chip_not_identified(l))?;
         if rom.len() as u64 > cfi.device_size {
             return Err(msg::rom_exceeds_chip(l, &format!("{} {}", rom.len() / 1024, msg::ko(l)), &format!("{} {}", cfi.device_size / 1024, msg::ko(l))));
         }
-        let idx = agb::choose_profile(d, &profiles, &found.matches, &found.answered)?;
+        let idx = agb::choose_profile(&mut *d.agb_bus(), &profiles, &found.matches, &found.answered)?;
         let profile = &profiles[idx];
+        if matches!(d, Dev::Chis(_)) {
+            zerocart_flashchips::chis_agb::can_program(profile)?; // nothing has been touched yet
+        }
         let chip = cfi.device_size as usize;
         let started = Instant::now();
 
@@ -672,7 +683,12 @@ impl Worker {
                     return Err(msg::cancelled(l));
                 }
                 let n = 0x4000.min(chip - v.len());
-                v.extend(d.read_rom(v.len() as u32, n).map_err(|e| e.to_string())?);
+                let at = v.len() as u32;
+                v.extend(match d {
+                    Dev::Gbx(g) => g.read_rom(at, n),
+                    Dev::Chis(c) => c.read_rom(at, n.min(chis::CHUNK)),
+                }
+                .map_err(|e| e.to_string())?);
                 let done = base + v.len() as u64;
                 let _ = tx.send(Event::Progress {
                     label: msg::backup_chip_progress(l),
@@ -692,14 +708,18 @@ impl Worker {
 
         // 2. Erase and write. From here on the transfer cannot be cancelled.
         let t1 = Instant::now();
-        let report = agb::flash_rom(d, profile, &rom, &mut |done, total, m| {
+        let mut on_progress = |done: usize, total: usize, m: &str| {
             let _ = tx.send(Event::Progress {
                 label: msg::writing_gba(l, m),
                 done: done as u64,
                 total: total as u64,
                 kib_s: done as f32 / 1024.0 / t1.elapsed().as_secs_f32().max(0.001),
             });
-        })
+        };
+        let report = match d {
+            Dev::Gbx(g) => agb::flash_rom(g, profile, &rom, &mut on_progress),
+            Dev::Chis(c) => zerocart_flashchips::chis_agb::flash_rom(c, profile, &rom, &mut on_progress),
+        }
         .map_err(|e| msg::old_chip_in(l, &e.to_string(), &name))?;
         Ok(msg::gba_written_ok(l, report.attempts as usize, report.repaired as usize, &name))
     }
@@ -711,10 +731,7 @@ impl Worker {
             Some((Some(m), _)) if m == DmgMapper::Mbc5 => m,
             Some(_) => return Err(msg::only_mbc5(l)),
             None => {
-                return match d {
-                    Dev::Gbx(g) => self.flash_rom_agb(g, path, tx),
-                    Dev::Chis(_) => Err(msg::chis_gba_write_unsupported(l)),
-                }
+                return self.flash_rom_agb(d, path, tx);
             }
         };
         if matches!(d, Dev::Chis(_)) && mapper != DmgMapper::Mbc5 {

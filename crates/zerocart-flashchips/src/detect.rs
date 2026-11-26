@@ -13,6 +13,18 @@ pub trait FlashBus {
     fn set_we_pin(&mut self, pin: u8) -> Result<(), String>;
 }
 
+impl<B: FlashBus + ?Sized> FlashBus for &mut B {
+    fn write_cmds(&mut self, cmds: &[(u32, u16)]) -> Result<(), String> {
+        (**self).write_cmds(cmds)
+    }
+    fn read(&mut self, address: u32, len: usize) -> Result<Vec<u8>, String> {
+        (**self).read(address, len)
+    }
+    fn set_we_pin(&mut self, pin: u8) -> Result<(), String> {
+        (**self).set_we_pin(pin)
+    }
+}
+
 impl<T: zerocart_core::Transport> FlashBus for zerocart_core::GbxCart<T> {
     fn write_cmds(&mut self, cmds: &[(u32, u16)]) -> Result<(), String> {
         if cmds.is_empty() {

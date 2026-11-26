@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.0.2
+
+- Chisflash: flashing a GBA ROM is now supported. Backup of the whole chip from two agreeing reads, chip erase with the profile's commands, programming with the reader's own command, read back and repair. Chips whose programming sequence is not the one the firmware sends are refused before anything is erased. New and not yet tried on real hardware: use a cartridge you can afford to lose first.
+- Chisflash: the Tools tab analysed a GBA cartridge on the Game Boy bus; it now uses the GBA bus.
+
 ## 1.0.1
 
 - ZeroSend now saves the files it receives in `~/zerocart` (the folder the flash screens look in) instead of `~/Downloads`: a ROM sent from a phone or a computer is listed at once.

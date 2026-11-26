@@ -140,3 +140,17 @@ n'a pas de tampon d'écriture dans sa CFI.
 2. Décider du trait commun « lecteur » (touche `device.rs`, le worker et l'app ; session `gbxflash-9e` à coordonner).
 3. Premiers tests matériel en lecture seule sur une cartouche de jeu normale : ID, lecture ROM comparée au SHA-1 des dumps,
    lecture de sauvegarde. Aucune écriture ni effacement sans cartouche sacrifiable.
+
+## Écriture GBA avec le Chisflash : lecture du firmware (2026-11-26)
+
+Relu dans `mcu/chis_flash_burner/Core/Src/uart.c` et `cart_adapter.c` (julpage/beggar_socket) avant d'écrire `chis_agb.rs` :
+
+- `romWrite` (0xF5) : adresse en MOTS passée telle quelle, données = mots 16 bits petit-boutiste, réponse 0xAA. Les profils
+  FlashGBX parlent en adresses d'octets : on divise par 2 (0xAAA -> 0x555, 0x555 -> 0x2AA), comme `GbxCart::flash_write`.
+- `romProgram` (0xF4) : adresse en OCTETS (le firmware fait `>> 1`), puis taille de tampon (2 octets), puis les données.
+  Séquence FIXE `AA`@0x555, `55`@0x2AA, `A0`@0x555 (mots), le mot, scrutation DQ7 jusqu'à la même valeur sur le bit 7, puis
+  deux relectures. Mode tampon : `25`, n-1, données, `29`. Aucun délai maximal (boucle jusqu'au reset DTR/RTS).
+  Conséquence : les profils dont la séquence est différente (ex. « Generic AAA/A9 ») sont refusés par `can_program`.
+- `romEraseChip` (0xF1) répond tout de suite ; `romEraseSector` (0xF3) attend la fin. Séquences fixes AMD aussi. ZeroCart
+  n'utilise ni l'un ni l'autre : l'effacement est celui du profil, envoyé par 0xF5, et scruté par lectures.
+- Pas encore essayé sur matériel (l'utilisateur utilise le lecteur pour autre chose).
