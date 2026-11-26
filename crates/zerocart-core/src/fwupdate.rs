@@ -419,6 +419,6 @@ mod tests {
             fn clear_input(&mut self) -> crate::Result<()> { Ok(()) }
         }
         assert!(connect_bootloader(&mut Silent).is_err());
-        assert_eq!(request_bootloader(&mut Silent).unwrap(), false, "a firmware that stays silent does not support it");
+        assert!(!request_bootloader(&mut Silent).unwrap(), "a firmware that stays silent does not support it");
     }
 }

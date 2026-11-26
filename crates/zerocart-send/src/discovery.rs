@@ -49,7 +49,7 @@ impl Peers {
 
     pub fn list(&self) -> Vec<Peer> {
         let mut v: Vec<Peer> = self.map.lock().unwrap().values().map(|e| e.0.clone()).collect();
-        v.sort_by(|a, b| (a.info.alias.to_lowercase(), a.ip).cmp(&(b.info.alias.to_lowercase(), b.ip)));
+        v.sort_by_key(|a| (a.info.alias.to_lowercase(), a.ip));
         v
     }
 

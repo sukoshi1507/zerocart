@@ -111,7 +111,7 @@ impl MdHeader {
     /// flash cart reads 0xFF everywhere and gives `None`: that is not an image size, do not guess one from it.
     pub fn rom_size(&self) -> Option<usize> {
         let size = self.rom_end as u64 + 1;
-        (self.rom_start == 0 && size >= 0x200 && size <= MAX_CART_BYTES as u64 && size % 2 == 0).then_some(size as usize)
+        (self.rom_start == 0 && size >= 0x200 && size <= MAX_CART_BYTES as u64 && size.is_multiple_of(2)).then_some(size as usize)
     }
 
     /// Whether the header looks like a real cartridge's (a Sega signature and a plausible size).
@@ -128,7 +128,7 @@ impl MdHeader {
 /// The Mega Drive checksum: the sum of the big-endian 16-bit words from 0x200 to the end of the ROM, modulo 65536,
 /// to compare with the word at 0x18E. (A ROM that is not a whole number of words ignores its last byte.)
 pub fn checksum16(rom: &[u8]) -> u16 {
-    rom.get(0x200..).unwrap_or(&[]).chunks_exact(2).fold(0u16, |s, w| s.wrapping_add(u16::from_be_bytes([w[0], w[1]])))
+    rom.get(0x200..).unwrap_or(&[]).as_chunks::<2>().0.iter().fold(0u16, |s, w| s.wrapping_add(u16::from_be_bytes([w[0], w[1]])))
 }
 
 /// The save data of a stream read from the bus: one byte of data per word, on the ODD byte (the even bytes read as
@@ -278,7 +278,7 @@ mod tests {
         }
         // bytes before 0x200 (the header, including the checksum itself) do not count
         let mut by_hand = 0u16;
-        for w in rom[0x200..].chunks_exact(2) {
+        for w in rom[0x200..].as_chunks::<2>().0 {
             by_hand = by_hand.wrapping_add(((w[0] as u16) << 8) | w[1] as u16);
         }
         assert_eq!(checksum16(&rom), by_hand);

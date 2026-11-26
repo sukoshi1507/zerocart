@@ -219,6 +219,6 @@ mod tests {
         let mut c = Canvas::new(100, 100, 0);
         draw(&mut c, Sprite::Gb, 10, 10, 2);
         assert_eq!(c.get(0, 0), Some(0), "nothing outside");
-        assert_eq!(c.get(10 + 4 * 2, 10 + 1 * 2), Some(0x101014), "the first outline cell (col 4, row 1)");
+        assert_eq!(c.get(10 + 4 * 2, 10 + 2), Some(0x101014), "the first outline cell (col 4, row 1)");
     }
 }

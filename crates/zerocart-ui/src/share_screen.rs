@@ -37,7 +37,7 @@ fn bar(p: &mut Painter, lang: Lang, alias: &str) {
 fn progress_bar(p: &mut Painter, pr: &ProgressView, y: i32) {
     let (bx, bw, bh) = (14, SCREEN_W - 28, 12);
     p.canvas.bordered(bx, y, bw, bh, BUTTON, 2, CREAM);
-    let pct = if pr.total == 0 { 0 } else { (pr.done.min(pr.total) * 100 / pr.total) as i32 };
+    let pct = (pr.done.min(pr.total) * 100).checked_div(pr.total).unwrap_or(0) as i32;
     p.rect(bx + 2, y + 2, (bw - 4) * pct / 100, bh - 4, ACCENT);
     let line = format!("{pct}%   {} / {} KiB", pr.done / 1024, pr.total / 1024);
     p.text(&line, 10, false, DIM, bx, y + bh + 4, Some(bw));

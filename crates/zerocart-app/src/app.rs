@@ -142,8 +142,8 @@ impl App {
                     self.dirty = true;
                 }
             }
-            Stage::Readers if !self.connecting => {
-                if self.last_scan.is_none_or(|t| now.duration_since(t) >= SCAN_EVERY) {
+            Stage::Readers if !self.connecting
+                && self.last_scan.is_none_or(|t| now.duration_since(t) >= SCAN_EVERY) => {
                     self.last_scan = Some(now);
                     let found = (self.scanner)();
                     if found != self.detected {
@@ -154,7 +154,6 @@ impl App {
                         self.dirty = true;
                     }
                 }
-            }
             _ => {}
         }
     }
@@ -559,6 +558,115 @@ impl App {
             analysis_scroll: self.analysis_scroll,
             analysing: self.analysing,
         }
+    }
+}
+
+/// The cardputer's arrows need the Fn key, which is awkward: F, Z, X and C (an inverted T: F above, Z X C below) are
+/// taken as up, left, down and right everywhere. The application has no text entry, so no letter is lost.
+pub fn arrow_alias(key: Key) -> Key {
+    match key {
+        Key::Char('f' | 'F') => Key::Up,
+        Key::Char('z' | 'Z') => Key::Left,
+        Key::Char('x' | 'X') => Key::Down,
+        Key::Char('c' | 'C') => Key::Right,
+        other => other,
+    }
+}
+
+/// Files of `dir` (not recursive) with one of the extensions, sorted by name.
+pub fn list_files(dir: &std::path::Path, exts: &[&str]) -> Vec<PathBuf> {
+    let mut v: Vec<PathBuf> = std::fs::read_dir(dir)
+        .map(|rd| rd.flatten().map(|e| e.path()).collect())
+        .unwrap_or_default();
+    v.retain(|p| {
+        p.is_file() && p.extension().and_then(|e| e.to_str()).is_some_and(|e| exts.iter().any(|x| x.eq_ignore_ascii_case(e)))
+    });
+    v.sort();
+    v
+}
+
+fn no_cartridge(lang: Lang) -> &'static str {
+    loc!(lang, fr: "Aucune cartouche", en: "No cartridge", ja: "カートがありません", zh: "没有卡带")
+}
+
+fn describe(p: &std::path::Path) -> String {
+    let size = std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+    format!("{}  ({} KiB)", p.file_name().unwrap_or_default().to_string_lossy(), size / 1024)
+}
+
+fn confirm_text_md(file: &std::path::Path, lang: Lang) -> Vec<String> {
+    let name = file.file_name().unwrap_or_default().to_string_lossy().into_owned();
+    let size = std::fs::metadata(file).map(|m| m.len()).unwrap_or(0);
+    let kib = size / 1024;
+    let mut v = vec![
+        loc!(lang,
+            fr: "ATTENTION : la ROM de la cartouche Mega Drive va être effacée (seuls les secteurs qui diffèrent)".to_string(),
+            en: "WARNING: the ROM of the Mega Drive cartridge will be erased (only the sectors that differ)".to_string(),
+            ja: "警告：メガドライブカートのROMを消去します（異なるセクターのみ）".to_string(),
+            zh: "警告：将擦除Mega Drive卡带的ROM（仅限不同的扇区）".to_string()),
+        loc!(lang, fr: format!("Écrire : {name} ({kib} Ko)"), en: format!("Write: {name} ({kib} KiB)"), ja: format!("書き込み：{name}（{kib} KiB）"), zh: format!("写入：{name}（{kib} KiB）")),
+        loc!(lang,
+            fr: "L'ancienne ROM est d'abord sauvegardée dans backups. Ne pas débrancher pendant l'écriture.".to_string(),
+            en: "The old ROM is saved to backups first. Do not unplug while writing.".to_string(),
+            ja: "旧ROMはまずbackupsに保存されます。書き込み中は抜かないでください。".to_string(),
+            zh: "旧ROM会先备份到backups。写入期间请勿拔出。".to_string()),
+    ];
+    if size > 4 << 20 {
+        v.push(
+            loc!(lang,
+                fr: "Plus de 4 Mo : la moitié haute de la puce est testée avant d'écrire (refusée si inaccessible).",
+                en: "Over 4 MiB: the upper half of the chip is tested before writing (refused if unreachable).",
+                ja: "4 MiB超：書き込み前にチップ上半分をテストします（使えない場合は中止）。",
+                zh: "超过4 MiB：写入前会测试芯片上半部分（无法访问则拒绝）。")
+            .into(),
+        );
+    }
+    v
+}
+
+fn confirm_text(action: Action, file: &std::path::Path, gba: bool, lang: Lang) -> Vec<String> {
+    let name = file.file_name().unwrap_or_default().to_string_lossy().into_owned();
+    let write = loc!(lang, fr: format!("Écrire : {name}"), en: format!("Write: {name}"), ja: format!("書き込み：{name}"), zh: format!("写入：{name}"));
+    match action {
+        Action::FlashRom if gba => vec![
+            loc!(lang,
+                fr: "ATTENTION : TOUTE la puce flash de la cartouche va être effacée".into(),
+                en: "WARNING: the WHOLE flash chip of the cartridge will be erased".into(),
+                ja: "警告：カートのフラッシュチップ全体を消去します".into(),
+                zh: "警告：将擦除卡带的整个闪存芯片".into()),
+            write,
+            loc!(lang,
+                fr: "Toute la puce est d'abord sauvegardée dans backups (plusieurs minutes). Ne pas débrancher pendant l'écriture.".into(),
+                en: "The whole chip is saved to backups first (several minutes). Do not unplug while writing.".into(),
+                ja: "チップ全体をまずbackupsに保存します（数分）。書き込み中は抜かないでください。".into(),
+                zh: "整个芯片会先备份到backups（需数分钟）。写入期间请勿拔出。".into()),
+        ],
+        Action::FlashRom => vec![
+            loc!(lang,
+                fr: "ATTENTION : la ROM de la cartouche va être effacée".into(),
+                en: "WARNING: the ROM of the cartridge will be erased".into(),
+                ja: "警告：カートのROMを消去します".into(),
+                zh: "警告：将擦除卡带的ROM".into()),
+            write,
+            loc!(lang,
+                fr: "L'ancienne ROM est d'abord sauvegardée dans le dossier backups. Ne pas débrancher pendant l'écriture.".into(),
+                en: "The old ROM is saved to the backups folder first. Do not unplug while writing.".into(),
+                ja: "旧ROMはまずbackupsフォルダに保存されます。書き込み中は抜かないでください。".into(),
+                zh: "旧ROM会先备份到backups文件夹。写入期间请勿拔出。".into()),
+        ],
+        _ => vec![
+            loc!(lang,
+                fr: "ATTENTION : la sauvegarde de la cartouche va être remplacée".into(),
+                en: "WARNING: the cartridge's save will be replaced".into(),
+                ja: "警告：カートのセーブを上書きします".into(),
+                zh: "警告：将替换卡带的存档".into()),
+            write,
+            loc!(lang,
+                fr: "L'ancienne sauvegarde est gardée dans backups si elle est lisible.".into(),
+                en: "The old save is kept in backups if it can be read.".into(),
+                ja: "旧セーブは読み取れればbackupsに保存されます。".into(),
+                zh: "旧存档若可读取，会保留在backups中。".into()),
+        ],
     }
 }
 
@@ -1158,115 +1266,6 @@ mod tests {
         assert!(!a.want_quit);
         down(&mut a, Key::Esc);
         assert!(a.want_quit);
-    }
-}
-
-/// The cardputer's arrows need the Fn key, which is awkward: F, Z, X and C (an inverted T: F above, Z X C below) are
-/// taken as up, left, down and right everywhere. The application has no text entry, so no letter is lost.
-pub fn arrow_alias(key: Key) -> Key {
-    match key {
-        Key::Char('f' | 'F') => Key::Up,
-        Key::Char('z' | 'Z') => Key::Left,
-        Key::Char('x' | 'X') => Key::Down,
-        Key::Char('c' | 'C') => Key::Right,
-        other => other,
-    }
-}
-
-/// Files of `dir` (not recursive) with one of the extensions, sorted by name.
-pub fn list_files(dir: &std::path::Path, exts: &[&str]) -> Vec<PathBuf> {
-    let mut v: Vec<PathBuf> = std::fs::read_dir(dir)
-        .map(|rd| rd.flatten().map(|e| e.path()).collect())
-        .unwrap_or_default();
-    v.retain(|p| {
-        p.is_file() && p.extension().and_then(|e| e.to_str()).is_some_and(|e| exts.iter().any(|x| x.eq_ignore_ascii_case(e)))
-    });
-    v.sort();
-    v
-}
-
-fn no_cartridge(lang: Lang) -> &'static str {
-    loc!(lang, fr: "Aucune cartouche", en: "No cartridge", ja: "カートがありません", zh: "没有卡带")
-}
-
-fn describe(p: &std::path::Path) -> String {
-    let size = std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
-    format!("{}  ({} KiB)", p.file_name().unwrap_or_default().to_string_lossy(), size / 1024)
-}
-
-fn confirm_text_md(file: &std::path::Path, lang: Lang) -> Vec<String> {
-    let name = file.file_name().unwrap_or_default().to_string_lossy().into_owned();
-    let size = std::fs::metadata(file).map(|m| m.len()).unwrap_or(0);
-    let kib = size / 1024;
-    let mut v = vec![
-        loc!(lang,
-            fr: "ATTENTION : la ROM de la cartouche Mega Drive va être effacée (seuls les secteurs qui diffèrent)".to_string(),
-            en: "WARNING: the ROM of the Mega Drive cartridge will be erased (only the sectors that differ)".to_string(),
-            ja: "警告：メガドライブカートのROMを消去します（異なるセクターのみ）".to_string(),
-            zh: "警告：将擦除Mega Drive卡带的ROM（仅限不同的扇区）".to_string()),
-        loc!(lang, fr: format!("Écrire : {name} ({kib} Ko)"), en: format!("Write: {name} ({kib} KiB)"), ja: format!("書き込み：{name}（{kib} KiB）"), zh: format!("写入：{name}（{kib} KiB）")),
-        loc!(lang,
-            fr: "L'ancienne ROM est d'abord sauvegardée dans backups. Ne pas débrancher pendant l'écriture.".to_string(),
-            en: "The old ROM is saved to backups first. Do not unplug while writing.".to_string(),
-            ja: "旧ROMはまずbackupsに保存されます。書き込み中は抜かないでください。".to_string(),
-            zh: "旧ROM会先备份到backups。写入期间请勿拔出。".to_string()),
-    ];
-    if size > 4 << 20 {
-        v.push(
-            loc!(lang,
-                fr: "Plus de 4 Mo : la moitié haute de la puce est testée avant d'écrire (refusée si inaccessible).",
-                en: "Over 4 MiB: the upper half of the chip is tested before writing (refused if unreachable).",
-                ja: "4 MiB超：書き込み前にチップ上半分をテストします（使えない場合は中止）。",
-                zh: "超过4 MiB：写入前会测试芯片上半部分（无法访问则拒绝）。")
-            .into(),
-        );
-    }
-    v
-}
-
-fn confirm_text(action: Action, file: &std::path::Path, gba: bool, lang: Lang) -> Vec<String> {
-    let name = file.file_name().unwrap_or_default().to_string_lossy().into_owned();
-    let write = loc!(lang, fr: format!("Écrire : {name}"), en: format!("Write: {name}"), ja: format!("書き込み：{name}"), zh: format!("写入：{name}"));
-    match action {
-        Action::FlashRom if gba => vec![
-            loc!(lang,
-                fr: "ATTENTION : TOUTE la puce flash de la cartouche va être effacée".into(),
-                en: "WARNING: the WHOLE flash chip of the cartridge will be erased".into(),
-                ja: "警告：カートのフラッシュチップ全体を消去します".into(),
-                zh: "警告：将擦除卡带的整个闪存芯片".into()),
-            write,
-            loc!(lang,
-                fr: "Toute la puce est d'abord sauvegardée dans backups (plusieurs minutes). Ne pas débrancher pendant l'écriture.".into(),
-                en: "The whole chip is saved to backups first (several minutes). Do not unplug while writing.".into(),
-                ja: "チップ全体をまずbackupsに保存します（数分）。書き込み中は抜かないでください。".into(),
-                zh: "整个芯片会先备份到backups（需数分钟）。写入期间请勿拔出。".into()),
-        ],
-        Action::FlashRom => vec![
-            loc!(lang,
-                fr: "ATTENTION : la ROM de la cartouche va être effacée".into(),
-                en: "WARNING: the ROM of the cartridge will be erased".into(),
-                ja: "警告：カートのROMを消去します".into(),
-                zh: "警告：将擦除卡带的ROM".into()),
-            write,
-            loc!(lang,
-                fr: "L'ancienne ROM est d'abord sauvegardée dans le dossier backups. Ne pas débrancher pendant l'écriture.".into(),
-                en: "The old ROM is saved to the backups folder first. Do not unplug while writing.".into(),
-                ja: "旧ROMはまずbackupsフォルダに保存されます。書き込み中は抜かないでください。".into(),
-                zh: "旧ROM会先备份到backups文件夹。写入期间请勿拔出。".into()),
-        ],
-        _ => vec![
-            loc!(lang,
-                fr: "ATTENTION : la sauvegarde de la cartouche va être remplacée".into(),
-                en: "WARNING: the cartridge's save will be replaced".into(),
-                ja: "警告：カートのセーブを上書きします".into(),
-                zh: "警告：将替换卡带的存档".into()),
-            write,
-            loc!(lang,
-                fr: "L'ancienne sauvegarde est gardée dans backups si elle est lisible.".into(),
-                en: "The old save is kept in backups if it can be read.".into(),
-                ja: "旧セーブは読み取れればbackupsに保存されます。".into(),
-                zh: "旧存档若可读取，会保留在backups中。".into()),
-        ],
     }
 }
 

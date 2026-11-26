@@ -106,7 +106,6 @@ pub trait CartReader {
     /// Selects the system (voltage and pins for the GBxCart, which bus protocol for the Chisflash) and returns the
     /// first [`HEADER_LEN`] bytes of the cartridge in the connector. An empty or wrong-system cartridge gives bytes
     /// that fail the header checks: the caller says so.
-
     fn read_header(&mut self, mode: CartMode) -> Result<Vec<u8>>;
     /// GBA ROM bytes (byte address, even address and length).
     fn read_agb_rom(&mut self, address: u32, len: usize) -> Result<Vec<u8>>;

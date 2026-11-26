@@ -18,6 +18,7 @@ impl Painter<'_> {
     }
 
     /// One line of text, cut with "..." when `max_w` is given and the text is longer.
+    #[allow(clippy::too_many_arguments)] // drawing primitives: position, size and style are separate on purpose
     pub fn text(&mut self, s: &str, px: u32, bold: bool, color: Rgb, x: i32, y: i32, max_w: Option<i32>) {
         match max_w {
             Some(w) => {
@@ -31,6 +32,7 @@ impl Painter<'_> {
     }
 
     /// Wrapped text; returns the number of lines drawn.
+    #[allow(clippy::too_many_arguments)] // drawing primitives: position, size and style are separate on purpose
     pub fn paragraph(&mut self, s: &str, px: u32, bold: bool, color: Rgb, x: i32, y: i32, w: i32) -> usize {
         let lines = self.fonts.wrap(s, px, bold, w);
         let lh = self.fonts.line_height(px, bold);
@@ -41,6 +43,7 @@ impl Painter<'_> {
     }
 
     /// Text centred in the box (x, y, w, h).
+    #[allow(clippy::too_many_arguments)] // drawing primitives: position, size and style are separate on purpose
     pub fn text_centered(&mut self, s: &str, px: u32, bold: bool, color: Rgb, x: i32, y: i32, w: i32, h: i32) {
         let tw = self.fonts.width(s, px, bold);
         let th = self.fonts.line_height(px, bold);

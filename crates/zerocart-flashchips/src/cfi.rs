@@ -50,7 +50,7 @@ pub fn parse(raw: &[u8]) -> Option<Cfi> {
         let a = ((b[0x2A] as usize) | (b[0x2C] as usize) << 8) * 2;
         if a + 0x3C >= 0x400 { 0x80 } else { a }
     };
-    let tb_boot_raw = if [b[pri], b[pri + 2], b[pri + 4]] == [b'P', b'R', b'I'] && !matches!(b[pri + 0x1E], 0 | 0xFF) {
+    let tb_boot_raw = if [b[pri], b[pri + 2], b[pri + 4]] == *b"PRI" && !matches!(b[pri + 0x1E], 0 | 0xFF) {
         b[pri + 0x1E]
     } else {
         0

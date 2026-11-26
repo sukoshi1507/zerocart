@@ -155,7 +155,7 @@ impl<T: Transport> Chis<T> {
 
     /// Reads the GBA ROM. `address` and `len` are in bytes and must be even.
     pub fn read_rom(&mut self, address: u32, len: usize) -> Result<Vec<u8>> {
-        if address % 2 != 0 || len % 2 != 0 {
+        if !address.is_multiple_of(2) || !len.is_multiple_of(2) {
             return Err(invalid("GBA ROM reads need an even address and length"));
         }
         let mut out = Vec::with_capacity(len);
@@ -293,7 +293,7 @@ impl<T: Transport> Chis<T> {
         if (address & 0x3fff) as usize + data.len() > 0x4000 {
             return Err(invalid("a GB programming request must stay inside one 16 KiB window"));
         }
-        if buffer_size > 0 && address % buffer_size as u32 != 0 {
+        if buffer_size > 0 && !address.is_multiple_of(buffer_size as u32) {
             return Err(invalid("the address must be a multiple of the write buffer size"));
         }
         let step = if buffer_size > 0 { (CHUNK / buffer_size as usize) * buffer_size as usize } else { CHUNK };
@@ -306,7 +306,7 @@ impl<T: Transport> Chis<T> {
     }
 
     fn program(&mut self, command: u8, address: u32, buffer_size: u16, data: &[u8]) -> Result<()> {
-        if address % 2 != 0 || data.len() % 2 != 0 {
+        if !address.is_multiple_of(2) || !data.len().is_multiple_of(2) {
             return Err(invalid("programming needs an even address and length"));
         }
         // A chunk is a multiple of the chip's write buffer so that every buffer is written whole.
@@ -323,7 +323,7 @@ impl<T: Transport> Chis<T> {
     /// DESTRUCTIVE. Raw write of 16-bit words to the ROM bus, with no chip algorithm (command sequences).
     /// `word_address` is a word address; `data` has an even length of 2 to 5000 bytes.
     pub fn write_rom_words(&mut self, word_address: u32, data: &[u8]) -> Result<()> {
-        if data.len() < 2 || data.len() % 2 != 0 || data.len() > MAX_PAYLOAD {
+        if data.len() < 2 || !data.len().is_multiple_of(2) || data.len() > MAX_PAYLOAD {
             return Err(invalid("raw ROM writes take 2 to 5000 bytes, even"));
         }
         self.send(cmd::ROM_WRITE, &with_address(word_address, &[], data))?;
@@ -372,7 +372,7 @@ mod tests {
                 }
                 cmd::ROM_READ => {
                     let n = u16::from_le_bytes([body[4], body[5]]) as usize;
-                    assert!(n % 2 == 0 && addr() % 2 == 0);
+                    assert!(n.is_multiple_of(2) && addr() % 2 == 0);
                     self.out.extend([0, 0]);
                     self.out.extend(self.rom[addr()..addr() + n].to_vec());
                 }

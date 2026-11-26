@@ -561,7 +561,9 @@ mod tests {
         }
     }
 
-    fn share(tag: &str, slow: bool) -> (Share, Arc<Fake>, PathBuf, Arc<Mutex<Option<Arc<dyn Ui>>>>) {
+    type UiSlot = Arc<Mutex<Option<Arc<dyn Ui>>>>;
+
+    fn share(tag: &str, slow: bool) -> (Share, Arc<Fake>, PathBuf, UiSlot) {
         let dir = std::env::temp_dir().join(format!("zerocart-share-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("backups")).unwrap();

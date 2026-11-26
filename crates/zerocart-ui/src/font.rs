@@ -134,6 +134,7 @@ impl Fonts {
     }
 
     /// Draws `text` with its top-left corner at (x, y); returns the width drawn.
+    #[allow(clippy::too_many_arguments)] // drawing primitives: position, size and style are separate on purpose
     pub fn draw(&self, canvas: &mut Canvas, text: &str, x: i32, y: i32, px: u32, bold: bool, color: Rgb) -> i32 {
         let baseline = y + self.ascent(px, bold);
         let mut pen = x as f32;

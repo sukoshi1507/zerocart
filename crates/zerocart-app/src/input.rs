@@ -249,7 +249,7 @@ impl Keypad {
         }
         let mut out = Vec::new();
         let whole = self.buf.len() / INPUT_EVENT_SIZE * INPUT_EVENT_SIZE;
-        for ev in self.buf[..whole].chunks_exact(INPUT_EVENT_SIZE) {
+        for ev in self.buf[..whole].as_chunks::<INPUT_EVENT_SIZE>().0 {
             let kind = u16::from_ne_bytes([ev[16], ev[17]]);
             let c = u16::from_ne_bytes([ev[18], ev[19]]);
             let value = i32::from_ne_bytes([ev[20], ev[21], ev[22], ev[23]]);

@@ -53,6 +53,7 @@ impl Canvas {
     }
 
     /// A filled box with a border of `bw` pixels drawn inside it (like a CSS border-box).
+    #[allow(clippy::too_many_arguments)] // drawing primitives: position, size and style are separate on purpose
     pub fn bordered(&mut self, x: i32, y: i32, w: i32, h: i32, fill: Rgb, bw: i32, border: Rgb) {
         self.fill_rect(x, y, w, h, border);
         self.fill_rect(x + bw, y + bw, w - 2 * bw, h - 2 * bw, fill);

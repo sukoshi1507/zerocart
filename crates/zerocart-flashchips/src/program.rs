@@ -113,7 +113,7 @@ pub fn plan_rewrite(p: &Profile, offset: u64, len: usize) -> Result<Plan, String
     if p.raw["commands"].get("single_write").is_none() {
         return Err("profile has no single_write".into());
     }
-    if offset % 0x2000 != 0 || len == 0 || len % 0x2000 != 0 {
+    if !offset.is_multiple_of(0x2000) || len == 0 || !len.is_multiple_of(0x2000) {
         return Err("offset and length must be multiples of 8 KiB".into());
     }
     let (start, end) = (offset as usize, offset as usize + len);

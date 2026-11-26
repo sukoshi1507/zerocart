@@ -217,3 +217,12 @@ Wi-Fi de l'utilisateur, sans l'application LocalSend :
   utiliser une adresse IP pour « ajouter par adresse ».
 
 ZeroSend validé avec l'application LocalSend d'un téléphone (2026-11-26, rev8, essai de l'utilisateur) : « tout fonctionne ».
+
+## Idées pour plus tard (mises de côté par l'utilisateur, 2026-11-26)
+
+- **Nouveaux systèmes** : Master System, Super Famicom, et d'autres (« qui sait »). Rien n'est commencé. Le terrain est prêt :
+  `CartKind` et `ReaderKind` sont `non_exhaustive`, un système = un genre de cartouche + un lecteur capable de le lire, avec la même démarche
+  que pour le Mega Drive (protocole du lecteur et simulateur d'abord, lecture comparée à un CRC connu, écriture seulement sur une cartouche
+  sacrifiable avec sauvegarde et relecture).
+- Écriture de sauvegarde Mega Drive : le code est là (détection d'une vraie SRAM, écriture, relecture) mais n'a pas pu être essayé sur du
+  matériel : la cartouche flash de l'utilisateur n'a pas de SRAM et l'écriture y est refusée proprement. À essayer avec un jeu d'origine à pile.

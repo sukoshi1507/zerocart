@@ -201,7 +201,7 @@ impl<T: Transport> FlashKit<T> {
 
     /// Reads `len` bytes (even) from `byte_addr` with the address auto-incrementing: big-endian words.
     pub fn read(&mut self, byte_addr: u32, len: usize) -> Result<Vec<u8>> {
-        if len % 2 != 0 || byte_addr % 2 != 0 {
+        if !len.is_multiple_of(2) || !byte_addr.is_multiple_of(2) {
             return Err(invalid("the Mega Drive bus is read in 16-bit words: even address and length"));
         }
         self.set_addr(byte_addr)?;
@@ -250,7 +250,7 @@ impl<T: Transport> FlashKit<T> {
         out: &mut dyn std::io::Write,
         progress: &mut dyn FnMut(usize) -> bool,
     ) -> Result<MdDump> {
-        if size == 0 || size % 2 != 0 || size > megadrive::MAX_CART_BYTES {
+        if size == 0 || !size.is_multiple_of(2) || size > megadrive::MAX_CART_BYTES {
             return Err(invalid("invalid ROM size"));
         }
         self.set_delay(1)?;
@@ -273,7 +273,7 @@ impl<T: Transport> FlashKit<T> {
 
     /// Writes `data` (even length) from `byte_addr` with the address auto-incrementing, in blocks of 64 KiB.
     pub fn write(&mut self, byte_addr: u32, data: &[u8]) -> Result<()> {
-        if data.len() % 2 != 0 || byte_addr % 2 != 0 {
+        if !data.len().is_multiple_of(2) || !byte_addr.is_multiple_of(2) {
             return Err(invalid("the Mega Drive bus is written in 16-bit words: even address and length"));
         }
         self.set_addr(byte_addr)?;
@@ -307,7 +307,7 @@ impl<T: Transport> FlashKit<T> {
     /// `megadrive::save_file_to_stream`) into the save RAM and reads it back: only the odd bytes are compared. The ROM
     /// is mapped back at the end. The caller checks [`ram_present`](Self::ram_present) first and keeps a backup.
     pub fn write_save_stream(&mut self, stream: &[u8]) -> Result<()> {
-        if stream.is_empty() || stream.len() % 2 != 0 {
+        if stream.is_empty() || !stream.len().is_multiple_of(2) {
             return Err(invalid("a save stream is made of 16-bit words"));
         }
         self.set_delay(1)?;
@@ -344,7 +344,9 @@ impl<T: Transport> FlashKit<T> {
     /// only query, autoselect and reset (0xF0) commands, never erase or program, and always leaves the chip in
     /// read-array mode. `None`: nothing answered (empty connector, mask ROM).
     pub fn probe_flash(&mut self) -> Result<Option<FlashIdInfo>> {
-        let probe = (|| -> Result<(Vec<u8>, Vec<u8>, Vec<u8>, bool)> {
+        /// What the identification reads: the array, the identifier words, the CFI size bytes, and whether CFI answered.
+        type Probe = (Vec<u8>, Vec<u8>, Vec<u8>, bool);
+        let probe = (|| -> Result<Probe> {
             let array = self.read(0, 0x20)?;
             self.write_byte(0x55 * 2, 0x98)?;
             let cfi = self.read(0x20, 6)?;
@@ -489,7 +491,7 @@ impl<T: Transport> FlashKit<T> {
     /// `25` and the word count at the buffer's address, the words, then `29`; then waits for the chip. A buffer never
     /// crosses a multiple of `buffer_bytes` (the first one is shorter when `offset` is not aligned).
     pub fn program_buffered(&mut self, offset: u32, data: &[u8], buffer_bytes: usize) -> Result<()> {
-        if offset % 2 != 0 || data.len() % 2 != 0 || data.is_empty() || buffer_bytes < 2 || buffer_bytes % 2 != 0 || buffer_bytes > 128 {
+        if !offset.is_multiple_of(2) || !data.len().is_multiple_of(2) || data.is_empty() || buffer_bytes < 2 || !buffer_bytes.is_multiple_of(2) || buffer_bytes > 128 {
             return Err(invalid("buffered programming needs an even address and length and a write buffer of 2 to 128 bytes"));
         }
         // Many buffers go out in ONE write: every call to the serial port waits for its output to drain, which costs
@@ -533,7 +535,7 @@ impl<T: Transport> FlashKit<T> {
     /// DESTRUCTIVE. Programs `data` (even length) at the even byte address `offset` word by word, in unlock-bypass
     /// mode, waiting for the chip after every word. The target must be erased: programming only clears bits.
     pub fn program(&mut self, offset: u32, data: &[u8]) -> Result<()> {
-        if offset % 2 != 0 || data.len() % 2 != 0 || data.is_empty() {
+        if !offset.is_multiple_of(2) || !data.len().is_multiple_of(2) || data.is_empty() {
             return Err(invalid("programming needs an even address and a non-empty even length"));
         }
         self.write_byte(0x555 * 2, 0xAA)?;
@@ -594,7 +596,7 @@ impl<T: Transport> FlashKit<T> {
         if geometry.command_set != 2 {
             return Err(invalid("only the AMD/Spansion command set is supported"));
         }
-        if image.is_empty() || image.len() % 2 != 0 || image.len() > geometry.size_bytes {
+        if image.is_empty() || !image.len().is_multiple_of(2) || image.len() > geometry.size_bytes {
             return Err(invalid("the image is empty, odd, or larger than the flash chip: nothing is erased"));
         }
         self.set_delay(0)?;
@@ -1405,7 +1407,7 @@ mod tests {
         assert!(k.upper_half_writable(&g).unwrap());
         assert_eq!(k.t.rom, before);
         let mut image = before[..UPPER_HALF].to_vec();
-        image.extend(std::iter::repeat(0x77).take(0x20000)); // two sectors above 0x400000
+        image.extend(std::iter::repeat_n(0x77, 0x20000)); // two sectors above 0x400000
         let r = k.flash_rom(&g, &image, &mut |_, _, _| {}, &|| false).unwrap();
         assert_eq!(r.rewritten, 2);
         let s = k.into_inner();

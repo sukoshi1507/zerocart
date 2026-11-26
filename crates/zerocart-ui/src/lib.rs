@@ -322,7 +322,7 @@ fn actions(p: &mut Painter, v: &View) {
         p.text(&pr.label, 12, true, TEXT, 14, 54, Some(SCREEN_W - 28));
         let (bx, by, bw, bh) = (14, 78, SCREEN_W - 28, 14);
         p.canvas.bordered(bx, by, bw, bh, BUTTON, 2, CREAM);
-        let pct = if pr.total == 0 { 0 } else { (pr.done * 100 / pr.total) as i32 };
+        let pct = (pr.done * 100).checked_div(pr.total).unwrap_or(0) as i32;
         p.rect(bx + 2, by + 2, (bw - 4) * pct / 100, bh - 4, ACCENT);
         let eta = if pr.kib_s > 0.5 { ((pr.total - pr.done.min(pr.total)) as f32 / 1024.0 / pr.kib_s) as u32 } else { 0 };
         let line = format!("{pct}%   {} / {} KiB   {:.0} KiB/s   {}:{:02}", pr.done / 1024, pr.total / 1024, pr.kib_s, eta / 60, eta % 60);

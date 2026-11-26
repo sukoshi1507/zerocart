@@ -1070,7 +1070,7 @@ mod ram_write_tests {
         let data: Vec<u8> = (0..0x4000u32).map(|i| (i % 251) as u8).collect();
         d.write_dmg_ram(DmgMapper::Mbc5, &data, &mut |_| true).unwrap();
         let w = &d.t.written;
-        assert_eq!(w.iter().filter(|&&b| b == cmd::DMG_CART_WRITE_SRAM).count() >= 64, true);
+        assert!(w.iter().filter(|&&b| b == cmd::DMG_CART_WRITE_SRAM).count() >= 64);
         // the payload bytes appear in order after the commands
         let sent: usize = w.windows(1).filter(|x| x[0] == cmd::DMG_CART_WRITE_SRAM).count();
         assert!(sent >= 64);
@@ -1169,8 +1169,8 @@ mod agb_sram_write_tests {
         let mut d = dev();
         d.write_agb_sram(&vec![0x33; 0x8000], &mut |_| true).unwrap();
         let w = &d.t.written;
-        assert_eq!(w.iter().filter(|&&b| b == cmd::AGB_CART_WRITE_SRAM).count() >= 128, true);
-        assert_eq!(w.len() > 0x8000, true);
+        assert!(w.iter().filter(|&&b| b == cmd::AGB_CART_WRITE_SRAM).count() >= 128);
+        assert!(w.len() > 0x8000);
     }
 
     #[test]

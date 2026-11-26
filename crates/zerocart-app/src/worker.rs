@@ -619,7 +619,7 @@ impl Worker {
             }
         }
         if let Some(w) = found.we_pin {
-            lines.push(msg::write_pin(l, &w.to_string()));
+            lines.push(msg::write_pin(l, w));
         }
         match &found.cfi {
             None => lines.push(msg::cfi_unreadable(l)),
@@ -798,7 +798,7 @@ impl Worker {
             None => {
                 let e = c.entry.as_ref().ok_or_else(|| msg::game_not_in_database(l))?;
                 if !matches!(e.st, 3 | 7 | 8) {
-                    return Err(msg::save_type_unsupported(l, &agb_save_name(e.st)));
+                    return Err(msg::save_type_unsupported(l, agb_save_name(e.st)));
                 }
                 (e.ss as usize, None)
             }
@@ -822,8 +822,8 @@ impl Worker {
         let a = read_save_data(d, mapper, size, l, &mut |n| p_(n, &self.cancel, tx))?;
         let p_ = progress(msg::backing_up_old_save(l), size, total);
         let b = read_save_data(d, mapper, size, l, &mut |n| p_(n, &self.cancel, tx))?;
-        let note: String;
-        if a == b {
+        
+        let note: String = if a == b {
             let dir = self.out_dir.join("backups");
             std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
             let mut stem = format!("{} avant écriture", sanitize(&c.title));
@@ -832,10 +832,10 @@ impl Worker {
             }
             let file = unique_path(&dir, &stem, "sav");
             std::fs::write(&file, &a).map_err(|e| e.to_string())?;
-            note = msg::note_old_save(l, &file.file_name().unwrap_or_default().to_string_lossy());
+            msg::note_old_save(l, &file.file_name().unwrap_or_default().to_string_lossy())
         } else {
-            note = msg::note_old_save_unstable(l);
-        }
+            msg::note_old_save_unstable(l)
+        };
         // 2. Write, read back in the same power session.
         let p_ = progress(msg::writing_save(l), 2 * size, total);
         write_save_data(d, mapper, &data, l, &mut |n| p_(n, &self.cancel, tx))?;
@@ -1010,7 +1010,7 @@ impl Worker {
             None => {
                 let e = c.entry.as_ref().ok_or_else(|| msg::game_not_in_database(l))?;
                 if !matches!(e.st, 3 | 7 | 8) {
-                    return Err(msg::save_type_unsupported(l, &agb_save_name(e.st)));
+                    return Err(msg::save_type_unsupported(l, agb_save_name(e.st)));
                 }
                 e.ss as usize
             }
