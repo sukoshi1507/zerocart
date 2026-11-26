@@ -24,7 +24,7 @@ The user must be allowed to open the serial port (group `dialout`, the default u
 |---|---|---|---|
 | Read ROM (checked against the FlashGBX database, or the header checksum) | yes | yes | yes (CRC32 and header checksum) |
 | Read save | yes (MBC1/2/3/5) | yes (SRAM) | yes (declared in the header) |
-| Write save (read back, then re-read after a power cycle) | yes | yes (SRAM) | not yet |
+| Write save (read back, then re-read after a power cycle) | yes | yes (SRAM) | yes, on a cartridge with a real save RAM (flash carts without RAM are refused; not yet tried on hardware) |
 | Flash a ROM on a rewritable cartridge | yes (MBC5, AMD flash, 8 KiB and 64 KiB sectors) | yes (AMD flash, whole-chip erase; GBFlash only) | yes (AMD/Spansion flash, only the sectors that differ) |
 | Identify the flash chip (CFI) | yes | yes | yes |
 
