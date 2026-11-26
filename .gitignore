@@ -16,3 +16,8 @@
 # editor / OS
 *~
 .DS_Store
+
+# videos and screen recordings (kept for the store listing, never committed)
+*.MOV
+*.mov
+*.mp4
