@@ -2,6 +2,8 @@
 //!   zerocart-app [--db DIR] [--out DIR] [--lang fr|en|ja|zh] [--png OUT.png --tab info|actions|tools --reader gbflash|chis]
 //! `--png` renders a demo frame to a file and exits (no display, no reader): used to check the screens.
 mod app;
+mod batch;
+mod jingle;
 mod fb;
 mod readers;
 mod input;
@@ -123,6 +125,24 @@ fn demo_png(args: &[String], out: &str, lang: Lang, fonts: &Fonts) -> Result<(),
                 screens::render_placeholder(&mut p, lang, System::MegaDrive, &["Mega Drive : bientôt dans l'application", "Le MD Flasher répond.", "Utilisez zerocart-md en ligne de commande."]);
                 true
             }
+            Some(b) if b.starts_with("batch") => {
+                use zerocart_ui::batch_screen::{render_batch, BatchPhase, BatchView};
+                let phase = match b {
+                    "batch-pick" => BatchPhase::Pick,
+                    "batch-flash" => BatchPhase::Flashing,
+                    "batch-done" => BatchPhase::Eject { ok: true },
+                    "batch-fail" => BatchPhase::Eject { ok: false },
+                    _ => BatchPhase::Insert,
+                };
+                let files = vec!["Vampire Killer.gba  (2048 KiB)".to_string(), "Mr. Driller 2.gba  (4096 KiB)".to_string()];
+                let pr = ProgressView { label: "Écriture GBA".into(), done: 3 << 20, total: 4 << 20, kib_s: 52.0 };
+                let t_ms = arg(args, "--t").and_then(|s| s.parse().ok()).unwrap_or(1500);
+                render_batch(&mut p, &BatchView {
+                    lang, phase, files: &files, selected: sel, file: "Vampire Killer.gba", ok: 11, failed: 1, last_secs: Some(94),
+                    progress: Some(&pr), message: (phase == BatchPhase::Eject { ok: false }).then_some(("Vérification : différences", true)), t_ms,
+                });
+                true
+            }
             _ => false,
         };
         if done {
@@ -205,6 +225,9 @@ fn main() {
     let handle = std::thread::spawn(move || worker.run(cmd_rx, ev_tx));
     let mut app = App::new(lang, cmd_tx.clone(), cancel, out_dir);
     app.lang_cell = Some(lang_cell);
+    if args.iter().any(|a| a == "--no-sound") {
+        app.mute();
+    }
     // Test aid: `--reader gbx|chis|krikzz --system gb|gbc|gba|md` skips the start screens.
     if let (Some(r), Some(sy)) = (arg(&args, "--reader"), arg(&args, "--system")) {
         let kind = match r.as_str() {

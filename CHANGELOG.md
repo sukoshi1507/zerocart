@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.1.0
+
+- Serial flash mode (`I` on the system screen): one ROM written on cartridge after cartridge, for blank cartridges, or any cartridge you accept to overwrite (the contents are never looked at, nothing is backed up: at the user's own risk). Pick the system and the reader as usual, then the ROM; after that the screen only says what to do. A jingle asks for a cartridge (ding), the flash chip answering is the proof that one is in (a blank cartridge has no header), a double ding starts the work (erase, write, verify, no backup), a fanfare says "done, eject" (or a low buzz says it failed), and as soon as the connector is seen empty the next cartridge is asked for. `Enter` on the eject screen goes on when a quick swap went unnoticed; `Esc` stops (not while a cartridge is being written). Counts of good and failed cartridges and the time of the last one are shown. Works for Game Boy / Color (taken as MBC5), Game Boy Advance and Mega Drive.
+- The screen is a small cracktro: copper bars, a shadowed logo with a glint, a starfield and a sine-wave scroller. The jingles are chiptune synthesised in memory and played with `aplay` (the package now depends on `alsa-utils`); `--no-sound` silences them.
+- Limit: a reader that cannot cut the power (Chisflash) keeps the cartridge powered while it is swapped; the GBFlash is powered down between looks.
+
 ## 1.0.5
 
 - New icon: the ZeroStack family logo (neon cartridge with the slashed zero, pixel-notched tile), shared with ZeroTag and ZeroTier. Source in `assets/logo/zerocart.svg`, rendered by `packaging/make_icon.py`.

@@ -44,6 +44,19 @@ Not handled yet: other Game Boy mappers, flash chips with buffered writes or oth
 not guessed), Mega Drive save writing, interleaved `.smd` files, GBxCart-specific firmware features, the e-Reader
 and the Pocket Camera.
 
+## Serial flash mode
+
+For flashing many blank cartridges with the same ROM. On the system screen, put the cursor on a system and press `I`
+(instead of Enter), choose the reader, then the ROM from `~/zerocart`. From there the operator only follows the
+screen and the sounds: a *ding* asks for a cartridge, a *ding ding* says it was recognised and the work starts (erase,
+write, read back; **no backup**), a fanfare says to eject it (a low buzz if it
+failed, the screen then says why), and the next *ding* comes as soon as the connector is empty. `Enter` goes on to
+the next cartridge if a quick swap went unnoticed, `Esc` stops (not while a cartridge is being written). The jingles
+need `aplay` (package `alsa-utils`); `--no-sound` turns them off. Cartridges are recognised by their flash chip
+answering, so a cartridge that is not a flash one is simply never started. What is on the cartridge is never looked at: a
+blank one and one already flashed (a test cartridge, say) are treated the same and overwritten without a question. This
+mode is at the user's own risk.
+
 ## Sharing with ZeroSend
 
 `S` on the system screen opens ZeroSend, a Rust implementation of the LocalSend v2 protocol (TLS with a certificate

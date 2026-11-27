@@ -33,6 +33,12 @@ pub enum Cmd {
     FlashRom(PathBuf, bool),
     /// Game Boy: write the save file to the cartridge RAM (the current save is backed up first, if it is stable).
     WriteSave(PathBuf),
+    /// Serial flash mode: is a flash cartridge (blank or not) in the reader? Answered by `Event::BatchProbe`; the
+    /// reader is powered down again when there is none.
+    BatchProbe { dmg: bool },
+    /// Serial flash mode: erase, write and verify the ROM on the cartridge, without a backup (the cartridges are
+    /// blank), then power it down so that it can be taken out. Answered by `Event::BatchResult`.
+    BatchFlash { path: PathBuf, dmg: bool },
     Quit,
 }
 
@@ -45,6 +51,10 @@ pub enum Event {
     Finished(Result<String, String>),
     /// The lines of a flash chip analysis; a line starting with `!` is a warning.
     Analysis(Result<Vec<String>, String>),
+    /// `Ok(true)`: a flash cartridge answers; `Ok(false)`: the connector is empty; `Err`: something is in it that must
+    /// not be flashed in this mode (a Game Boy Advance cartridge while Game Boy was chosen).
+    BatchProbe(Result<bool, String>),
+    BatchResult(Result<String, String>),
 }
 
 /// The Krikzz programmer and the header of the cartridge in it.
@@ -158,7 +168,7 @@ impl Worker {
         while let Ok(cmd) = rx.recv() {
             self.cancel.store(false, Ordering::SeqCst);
             if let Some(state) = md.as_mut() {
-                if matches!(cmd, Cmd::Detect { .. } | Cmd::ReadRom | Cmd::ReadSave | Cmd::Analyze | Cmd::FlashRom(..) | Cmd::WriteSave(_)) {
+                if matches!(cmd, Cmd::Detect { .. } | Cmd::ReadRom | Cmd::ReadSave | Cmd::Analyze | Cmd::FlashRom(..) | Cmd::WriteSave(_) | Cmd::BatchProbe { .. } | Cmd::BatchFlash { .. }) {
                     self.md_command(state, cmd, &tx);
                     continue;
                 }
@@ -228,6 +238,20 @@ impl Worker {
                         _ => Err(msg::no_cartridge(self.lang())),
                     };
                     self.after_write(&mut dev, kind, &mut cart, r, &tx);
+                }
+                Cmd::BatchProbe { dmg } => {
+                    let r = self.batch_probe(&mut dev, kind, dmg);
+                    let _ = tx.send(Event::BatchProbe(r));
+                }
+                Cmd::BatchFlash { path, dmg } => {
+                    let r = match dev.as_mut() {
+                        Some(d) => self.batch_flash(d, &path, dmg, &tx),
+                        None => Err(msg::no_cartridge(self.lang())),
+                    };
+                    if let Some(mut d) = dev.take() {
+                        let _ = d.r().close(); // the cartridge is unpowered: it can be taken out
+                    }
+                    let _ = tx.send(Event::BatchResult(r));
                 }
                 Cmd::Quit => {
                     if let Some(d) = dev.as_mut() {
@@ -301,6 +325,14 @@ impl Worker {
             Cmd::WriteSave(path) => {
                 let r = self.md_write_save(md, &path, tx);
                 let _ = tx.send(Event::Finished(r));
+            }
+            Cmd::BatchProbe { .. } => {
+                let r = md.kit.read_geometry().map(|g| g.is_some()).map_err(|e| e.to_string());
+                let _ = tx.send(Event::BatchProbe(r));
+            }
+            Cmd::BatchFlash { path, .. } => {
+                let r = self.md_flash_rom(md, &path, false, tx);
+                let _ = tx.send(Event::BatchResult(r));
             }
             _ => {
                 let _ = tx.send(Event::Finished(Err(msg::md_save_write_unsupported(self.lang()))));
@@ -579,6 +611,57 @@ impl Worker {
         let info = d.r().info(CartMode::Agb);
         let view = ReaderView { name: info.name, firmware: info.firmware, voltage: info.voltage };
         Ok((Some(d), view))
+    }
+
+    /// Serial flash mode: does a flash chip answer? A blank cartridge has no header, so the only proof of a cartridge is
+    /// the chip itself (its CFI table). The reader is kept open (and the cartridge powered) only when one answers.
+    fn batch_probe(&self, dev: &mut Option<Dev>, kind: Option<zerocart_core::ReaderKind>, dmg: bool) -> Result<bool, String> {
+        let l = self.lang();
+        let mut d = match dev.take() {
+            Some(d) => d,
+            None => Dev::open_kind(kind.ok_or_else(|| msg::no_cartridge(l))?, l)?,
+        };
+        let r = self.batch_check(&mut d, dmg);
+        if matches!(r, Ok(true)) {
+            *dev = Some(d);
+        } else {
+            let _ = d.r().close(); // nothing there (or not for us): leave the connector unpowered
+        }
+        r
+    }
+
+    fn batch_check(&self, d: &mut Dev, dmg: bool) -> Result<bool, String> {
+        use zerocart_flashchips::{detect, load_dir};
+        // Same guard as the single-cartridge mode: a reader that sets the voltage looks at 3.3 V first, and never
+        // puts 5 V on a Game Boy Advance cartridge.
+        if dmg && !d.r().info(CartMode::Dmg).voltage.is_empty() {
+            if let Ok(h) = d.r().read_header(CartMode::Agb) {
+                if gba_cart_inside(&h) {
+                    return Err(msg::batch_gba_inside(self.lang()));
+                }
+            }
+        }
+        let mode = if dmg { CartMode::Dmg } else { CartMode::Agb };
+        d.r().read_header(mode).map_err(|e| e.to_string())?;
+        let (profiles, _) = load_dir(&self.db_dir);
+        if profiles.is_empty() {
+            return Err(msg::profiles_missing(self.lang(), &self.db_dir.display().to_string()));
+        }
+        let found = if dmg { detect(d.bus(), &profiles, "DMG")? } else { detect(&mut *d.agb_bus(), &profiles, "AGB")? };
+        Ok(found.cfi.is_some())
+    }
+
+    /// Serial flash mode: the cartridge is taken as blank (no backup). A Game Boy cartridge is taken as an MBC5 one,
+    /// the only mapper that can be flashed, since a blank chip has no header to say so.
+    fn batch_flash(&self, d: &mut Dev, path: &Path, dmg: bool, tx: &Sender<Event>) -> Result<String, String> {
+        let rom = std::fs::read(path).map_err(|e| e.to_string())?;
+        let cart = if dmg {
+            let title = parse_dmg(&rom).map(|h| h.title).unwrap_or_default();
+            Cart { mode: CartMode::Dmg, entry: None, rom_size: rom.len(), title, dmg: Some((Some(DmgMapper::Mbc5), 0)), ram_size: 0 }
+        } else {
+            Cart { mode: CartMode::Agb, entry: None, rom_size: rom.len(), title: String::new(), dmg: None, ram_size: 0 }
+        };
+        self.flash_rom(d, &cart, path, false, tx)
     }
 
     /// After a write the cartridge may have changed: identify it again, then report the result.

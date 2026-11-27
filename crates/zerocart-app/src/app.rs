@@ -9,7 +9,10 @@ use std::time::{Duration, Instant};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::Arc;
+use crate::batch::{Batch, Out};
 use crate::input::{Key, Routed};
+use crate::jingle::Jingle;
+use zerocart_ui::batch_screen::BatchView;
 use zerocart_ui::{loc, Lang};
 
 /// A write action being set up: first a file is picked, then it is confirmed with Y.
@@ -32,6 +35,8 @@ pub enum Stage {
     Main,
     /// File sharing (ZeroSend): reached from the system choice with S
     Share,
+    /// Serial flash mode: one ROM on cartridge after cartridge (reached from the system choice with I)
+    Batch,
 }
 
 const SPLASH_TIME: Duration = Duration::from_millis(1600);
@@ -80,6 +85,12 @@ pub struct App {
     analysis: Option<Vec<String>>,
     analysis_scroll: usize,
     analysing: bool,
+    /// The serial flash mode, alive while its screen is open; `batch_next`: the reader being chosen is for it.
+    batch: Option<Batch>,
+    batch_next: bool,
+    sound: Box<dyn FnMut(Jingle)>,
+    anim_since: Option<Instant>,
+    anim_ms: u64,
 }
 
 impl App {
@@ -92,7 +103,19 @@ impl App {
             picker_items: Vec::new(), confirm_lines: Vec::new(), raster_since: None, raster_frame: 0, flow_gba: false, flow_md: false,
             analysis: None, analysis_scroll: 0, analysing: false,
             share: None, share_starter: crate::share::default_starter(out_dir.clone()),
+            batch: None, batch_next: false, sound: Box::new(crate::jingle::play), anim_since: None, anim_ms: 0,
         }
+    }
+
+    /// Silences the jingles (`--no-sound`).
+    pub fn mute(&mut self) {
+        self.sound = Box::new(|_| {});
+    }
+
+    /// Replaces the speaker (tests).
+    #[cfg(test)]
+    pub fn set_sound(&mut self, f: impl FnMut(Jingle) + 'static) {
+        self.sound = Box::new(f);
     }
 
     /// Replaces the USB scan (tests).
@@ -133,6 +156,17 @@ impl App {
 
     /// Called every loop turn: ends the splash, and refreshes the "plugged in" check while the readers are shown.
     pub fn tick(&mut self, now: Instant) {
+        if self.stage == Stage::Batch {
+            // the demo effects move all the time: about 25 frames a second
+            let since = *self.anim_since.get_or_insert(now);
+            let ms = now.duration_since(since).as_millis() as u64;
+            if ms / 40 != self.anim_ms / 40 {
+                self.dirty = true;
+            }
+            self.anim_ms = ms;
+            let out = self.batch.as_mut().map(|b| b.tick(now)).unwrap_or_default();
+            self.batch_out(out);
+        }
         if matches!(self.flow, Flow::Confirming { no_backup: true, .. }) {
             let since = *self.raster_since.get_or_insert(now);
             let frame = (now.duration_since(since).as_millis() / 50) as u32;
@@ -214,8 +248,21 @@ impl App {
                 self.reader_moved = false;
                 self.reader_sel = self.first_plugged();
             }
+            Stage::Batch => {
+                let _ = self.tx.send(Cmd::Disconnect);
+                self.reader = None;
+                self.batch = None;
+                self.batch_next = false;
+                self.banner = None;
+                self.stage = Stage::Readers;
+                self.connecting = false;
+                self.last_scan = None;
+                self.reader_moved = false;
+                self.reader_sel = self.first_plugged();
+            }
             Stage::Readers => {
                 self.banner = None;
+                self.batch_next = false;
                 self.stage = Stage::System;
             }
             Stage::System => self.want_quit = true,
@@ -267,14 +314,17 @@ impl App {
             (Stage::Splash, _) => self.stage = Stage::System,
             (Stage::System, Key::Left) => self.system_sel = (self.system_sel + System::ALL.len() - 1) % System::ALL.len(),
             (Stage::System, Key::Right | Key::Tab) => self.system_sel = (self.system_sel + 1) % System::ALL.len(),
-            (Stage::System, Key::Enter) => {
-                self.system = System::ALL[self.system_sel];
-                self.stage = Stage::Readers;
-                self.detected.clear();
-                self.last_scan = None;
-                self.reader_sel = 0;
-                self.reader_moved = false;
-                self.banner = None;
+            (Stage::System, Key::Enter) => self.pick_system(false),
+            (Stage::System, Key::Char('i' | 'I')) => self.pick_system(true),
+            (Stage::Batch, Key::Esc) => {
+                // a cartridge being written is never abandoned half way
+                if !self.batch.as_ref().is_some_and(|b| b.flashing()) {
+                    self.back();
+                }
+            }
+            (Stage::Batch, k) => {
+                let out = self.batch.as_mut().map(|b| b.key(k)).unwrap_or_default();
+                self.batch_out(out);
             }
             (Stage::System, Key::Char('s' | 'S')) => self.open_share(),
             (Stage::System, Key::Char('l' | 'L')) => self.next_language(),
@@ -302,6 +352,61 @@ impl App {
                 }
             }
             _ => self.dirty = false,
+        }
+    }
+
+    /// The system under the cursor is chosen; `batch`: for the serial flash mode rather than the tabs.
+    fn pick_system(&mut self, batch: bool) {
+        self.system = System::ALL[self.system_sel];
+        self.batch_next = batch;
+        self.stage = Stage::Readers;
+        self.detected.clear();
+        self.last_scan = None;
+        self.reader_sel = 0;
+        self.reader_moved = false;
+        self.banner = None;
+    }
+
+    /// The reader is connected for the serial mode: the ROM to write is chosen first.
+    fn enter_batch(&mut self) {
+        let md = self.system == System::MegaDrive;
+        let exts: &[&str] = match self.system {
+            _ if md => &["bin", "md", "gen"],
+            System::Gba => &["gba"],
+            _ => &["gb", "gbc"],
+        };
+        let files = list_files(&self.out_dir, exts);
+        if files.is_empty() {
+            let (ext, dir) = (exts.iter().map(|e| format!(".{e}")).collect::<Vec<_>>().join(" / "), self.out_dir.display());
+            self.banner = Some((
+                loc!(self.lang,
+                    fr: format!("Aucun fichier {ext} dans {dir}"),
+                    en: format!("No {ext} file in {dir}"),
+                    ja: format!("{dir} に {ext} ファイルがありません"),
+                    zh: format!("{dir} 中没有 {ext} 文件")),
+                true,
+            ));
+            self.batch_next = false;
+            let _ = self.tx.send(Cmd::Disconnect);
+            return;
+        }
+        self.batch = Some(Batch::new(self.dmg(), files));
+        self.batch_next = false;
+        self.anim_since = None;
+        self.stage = Stage::Batch;
+        self.banner = None;
+    }
+
+    /// Carries out what the serial mode asks for: worker commands and jingles.
+    fn batch_out(&mut self, out: Vec<Out>) {
+        for o in out {
+            match o {
+                Out::Send(cmd) => {
+                    let _ = self.tx.send(cmd);
+                }
+                Out::Play(j) => (self.sound)(j),
+            }
+            self.dirty = true;
         }
     }
 
@@ -509,7 +614,11 @@ impl App {
             Event::Connected(Ok(view)) => {
                 self.connecting = false;
                 self.reader = Some(view);
-                self.enter_main(self.system);
+                if self.batch_next {
+                    self.enter_batch();
+                } else {
+                    self.enter_main(self.system);
+                }
             }
             Event::Connected(Err(msg)) => {
                 self.connecting = false;
@@ -526,6 +635,15 @@ impl App {
                 self.scanning = false;
                 self.reader = None;
                 self.banner = Some((msg, true));
+            }
+            Event::BatchProbe(r) => {
+                let out = self.batch.as_mut().map(|b| b.probe_result(r, Instant::now())).unwrap_or_default();
+                self.batch_out(out);
+            }
+            Event::BatchResult(r) => {
+                self.progress = None;
+                let out = self.batch.as_mut().map(|b| b.flash_result(r, Instant::now())).unwrap_or_default();
+                self.batch_out(out);
             }
             Event::Progress { label, done, total, kib_s } => {
                 self.progress = Some(ProgressView { label, done, total, kib_s });
@@ -554,6 +672,17 @@ impl App {
             Stage::Share => {
                 if let Some(s) = &self.share {
                     s.render(p);
+                }
+            }
+            Stage::Batch => {
+                if let Some(b) = &self.batch {
+                    let names: Vec<String> = b.files.iter().map(|f| describe(f)).collect();
+                    let file = b.file.as_ref().and_then(|f| f.file_name()).map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
+                    zerocart_ui::batch_screen::render_batch(p, &BatchView {
+                        lang: self.lang, phase: b.phase, files: &names, selected: b.selected, file: &file, ok: b.ok,
+                        failed: b.failed, last_secs: b.last_secs, progress: self.progress.as_ref(),
+                        message: b.message.as_ref().map(|(m, e)| (m.as_str(), *e)), t_ms: self.anim_ms,
+                    });
                 }
             }
         }
@@ -1371,5 +1500,68 @@ mod tests {
         down(&mut a, Key::Esc);
         assert!(a.want_quit);
     }
-}
 
+    #[test]
+    fn the_serial_mode_runs_cartridge_after_cartridge_with_its_jingles() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("game.gba"), vec![0u8; 2048]).unwrap();
+        let (tx, rx) = channel();
+        let mut a = App::new(Lang::Fr, tx, Arc::new(AtomicBool::new(false)), d.path().to_path_buf())
+            .with_scanner(|| vec![plugged(ReaderKind::GbxCart)]);
+        let heard = Rc::new(RefCell::new(Vec::new()));
+        let h = heard.clone();
+        a.set_sound(move |j| h.borrow_mut().push(j));
+        down(&mut a, Key::Enter); // splash
+        down(&mut a, Key::Right);
+        down(&mut a, Key::Right); // Game Boy Advance
+        down(&mut a, Key::Char('i')); // serial mode
+        assert_eq!(a.stage, Stage::Readers);
+        a.tick(Instant::now());
+        down(&mut a, Key::Enter);
+        assert!(matches!(rx.try_recv().unwrap(), Cmd::Connect(ReaderKind::GbxCart)));
+        a.on_event(Event::Connected(Ok(reader())));
+        assert_eq!(a.stage, Stage::Batch);
+        assert!(rx.try_recv().is_err(), "no cartridge is read: a blank one has no header");
+        down(&mut a, Key::Enter); // the only ROM
+        assert_eq!(*heard.borrow(), vec![Jingle::Insert]);
+        let t = Instant::now();
+        a.tick(t);
+        assert!(matches!(rx.try_recv().unwrap(), Cmd::BatchProbe { dmg: false }));
+        a.on_event(Event::BatchProbe(Ok(true)));
+        assert_eq!(*heard.borrow(), vec![Jingle::Insert, Jingle::Detected]);
+        match rx.try_recv().unwrap() {
+            Cmd::BatchFlash { path, dmg } => assert_eq!((path.file_name().unwrap().to_str().unwrap(), dmg), ("game.gba", false)),
+            other => panic!("{other:?}"),
+        }
+        down(&mut a, Key::Esc);
+        assert_eq!(a.stage, Stage::Batch, "a cartridge being written is not abandoned");
+        a.on_event(Event::BatchResult(Ok("done".into())));
+        assert_eq!(heard.borrow().last(), Some(&Jingle::Done));
+        a.tick(t + Duration::from_secs(2));
+        assert!(matches!(rx.try_recv().unwrap(), Cmd::BatchProbe { .. }));
+        a.on_event(Event::BatchProbe(Ok(false))); // taken out
+        assert_eq!(heard.borrow().last(), Some(&Jingle::Insert));
+        down(&mut a, Key::Esc);
+        assert_eq!(a.stage, Stage::Readers);
+        assert!(matches!(rx.try_recv().unwrap(), Cmd::Disconnect));
+    }
+
+    #[test]
+    fn the_serial_mode_without_a_rom_says_so_and_lets_go_of_the_reader() {
+        let d = tempfile::tempdir().unwrap();
+        let (tx, rx) = channel();
+        let mut a = App::new(Lang::En, tx, Arc::new(AtomicBool::new(false)), d.path().to_path_buf())
+            .with_scanner(|| vec![plugged(ReaderKind::GbxCart)]);
+        down(&mut a, Key::Enter);
+        down(&mut a, Key::Char('i'));
+        a.tick(Instant::now());
+        down(&mut a, Key::Enter);
+        rx.try_recv().unwrap();
+        a.on_event(Event::Connected(Ok(reader())));
+        assert_eq!(a.stage, Stage::Readers);
+        assert!(a.banner.as_ref().is_some_and(|b| b.1 && b.0.contains(".gb")));
+        assert!(matches!(rx.try_recv().unwrap(), Cmd::Disconnect));
+    }
+}

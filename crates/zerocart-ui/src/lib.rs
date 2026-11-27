@@ -6,6 +6,7 @@
 
 #[macro_use]
 pub mod loc;
+pub mod batch_screen;
 pub mod canvas;
 pub mod font;
 pub mod icons;

@@ -76,7 +76,7 @@ Maintainer: ${MAINTAINER}
 Installed-Size: ${SIZE}
 Section: utils
 Priority: optional
-Depends: fonts-noto-cjk
+Depends: fonts-noto-cjk, alsa-utils
 Homepage: https://github.com/lesserkuma/FlashGBX
 Description: Game Boy / Color / Advance cartridge reader and flasher for CardputerZero
  Reads and writes Game Boy, Game Boy Color and Game Boy Advance cartridges

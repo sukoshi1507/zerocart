@@ -11,6 +11,15 @@ pub fn ko(l: Lang) -> &'static str {
 pub fn cancelled(l: Lang) -> String {
     loc!(l, fr: "annulé", en: "cancelled", ja: "中止しました", zh: "已取消").into()
 }
+
+pub fn batch_gba_inside(l: Lang) -> String {
+    loc!(l,
+        fr: "Cartouche GBA détectée : le mode série est réglé sur Game Boy".into(),
+        en: "A GBA cartridge is in: the serial mode is set to Game Boy".into(),
+        ja: "GBAカートが入っています：連続書込はGame Boy設定です".into(),
+        zh: "检测到GBA卡带：连续烧录设为Game Boy".into())
+}
+
 pub fn no_cartridge(l: Lang) -> String {
     loc!(l, fr: "aucune cartouche", en: "no cartridge", ja: "カートがありません", zh: "没有卡带").into()
 }

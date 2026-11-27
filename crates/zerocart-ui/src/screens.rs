@@ -48,6 +48,7 @@ pub fn render_system(p: &mut Painter, lang: Lang, selected: usize, banner: Optio
         &[
             ("Z C", loc::word::pick(lang)),
             ("Enter", "ok"),
+            ("I", loc!(lang, fr: "série", en: "batch", ja: "連続", zh: "连续")),
             ("S", loc!(lang, fr: "partager", en: "share", ja: "共有", zh: "分享")),
             ("L", loc!(lang, fr: "langue", en: "lang", ja: "言語", zh: "语言")),
             ("Esc", loc::word::quit(lang)),
