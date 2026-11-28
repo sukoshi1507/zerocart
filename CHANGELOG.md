@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.2.1
+
+- Mega Drive: a cartridge without a SEGA header (blank, or erased by a failed flash) can be flashed by hand again. "Flash ROM" no longer wants a header, only that the flash chip answers (it says so when it does not), and the Tools tab analyses the chip without a header too. The banner now says that flashing is still possible. Reading still needs a cartridge.
+
 ## 1.2.0
 
 - Serial flash mode, new process: no more automatic detection of the cartridge. You put it in, press `Enter`, and ZeroCart looks for the chip, erases, writes and verifies; the verdict stays on screen until `Enter` goes on to the next cartridge (`R` retries a failed one). The connector is no longer polled while waiting (it powered the cartridge on and off every second, and started the write as soon as the chip answered, possibly before the cartridge was fully in).

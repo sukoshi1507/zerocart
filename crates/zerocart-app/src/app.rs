@@ -470,7 +470,7 @@ impl App {
         if self.analysing {
             return;
         }
-        if self.cart.is_none() {
+        if self.cart.is_none() && self.system != System::MegaDrive {
             self.banner = Some((no_cartridge(self.lang).into(), true));
             return;
         }
@@ -484,14 +484,16 @@ impl App {
     fn run_action(&mut self) {
         let action = Action::ALL[self.action_sel];
         let lang = self.lang;
-        let Some(cart) = &self.cart else {
+        let md = self.system == System::MegaDrive;
+        // A blank (or failed) Mega Drive flash cartridge has no SEGA header, which is no reason to refuse a flash: the
+        // worker looks at the chip itself and says so when none answers.
+        if self.cart.is_none() && !(md && action == Action::FlashRom) {
             self.banner = Some((no_cartridge(lang).into(), true));
             return;
-        };
+        }
         self.banner = None;
-        let md = self.system == System::MegaDrive;
         if action.writes() {
-            let gba = cart.system == "GBA";
+            let gba = self.cart.as_ref().is_some_and(|c| c.system == "GBA");
             let exts: &[&str] = match action {
                 Action::FlashRom if md => &["bin", "md", "gen"],
                 Action::WriteSave if md => &["sav", "srm"],
@@ -587,10 +589,10 @@ impl App {
                     let lang = self.lang;
                     let text = if self.system == System::MegaDrive {
                         loc!(lang,
-                            fr: "Pas de cartouche Mega Drive reconnue (en-tête SEGA absent)",
-                            en: "No Mega Drive cartridge recognised (no SEGA header)",
-                            ja: "メガドライブのカートを認識できません（SEGAヘッダーなし）",
-                            zh: "未识别到Mega Drive卡带（没有SEGA文件头）")
+                            fr: "Pas d'en-tête SEGA (cartouche vierge ?) : le flash reste possible",
+                            en: "No SEGA header (blank cartridge?): flashing is still possible",
+                            ja: "SEGAヘッダーなし（白紙カート？）：書き込みは可能です",
+                            zh: "没有SEGA文件头（空白卡带？）：仍可烧录")
                     } else if !self.dmg() {
                         loc!(lang,
                             fr: "Pas de cartouche GBA : est-ce une Game Boy ? (Échap : changer)",
@@ -1103,7 +1105,7 @@ mod tests {
         assert_eq!((a.stage, a.system), (Stage::Main, System::MegaDrive));
         assert!(matches!(rx.try_recv().unwrap(), Cmd::Detect { .. }), "the header is read at once");
         a.on_event(Event::Detected(Ok((reader(), None))));
-        assert_eq!(a.banner, Some(("Pas de cartouche Mega Drive reconnue (en-tête SEGA absent)".into(), true)));
+        assert_eq!(a.banner, Some(("Pas d'en-tête SEGA (cartouche vierge ?) : le flash reste possible".into(), true)));
         a.on_event(Event::Detected(Ok((reader(), Some(CartView { system: "Mega Drive", ..cart() })))));
         down(&mut a, Key::Right);
         down(&mut a, Key::Enter);
@@ -1474,6 +1476,27 @@ mod tests {
         a.on_event(Event::Analysis(Err("lecteur déconnecté".into())));
         assert!(!a.analysing && a.analysis.is_none());
         assert_eq!(a.banner, Some(("lecteur déconnecté".into(), true)));
+    }
+
+    #[test]
+    fn a_blank_mega_drive_cartridge_can_be_flashed_without_a_header() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("game.bin"), vec![0u8; 2048]).unwrap();
+        let (tx, rx) = channel();
+        let mut a = App::new(Lang::En, tx, Arc::new(AtomicBool::new(false)), d.path().to_path_buf());
+        a.enter_main(System::MegaDrive);
+        rx.try_recv().unwrap(); // the header is read at once
+        a.on_event(Event::Detected(Ok((ReaderView { name: "MD Flasher".into(), firmware: String::new(), voltage: "" }, None))));
+        assert!(a.cart.is_none());
+        a.tab = Tab::Actions;
+        a.action_sel = Action::ALL.iter().position(|x| *x == Action::FlashRom).unwrap();
+        down(&mut a, Key::Enter);
+        assert!(matches!(a.flow, Flow::Picking { .. }), "the ROM list opens although there is no header");
+        down(&mut a, Key::Esc);
+        a.action_sel = Action::ALL.iter().position(|x| *x == Action::ReadRom).unwrap();
+        down(&mut a, Key::Enter);
+        assert!(a.banner.as_ref().is_some_and(|b| b.1), "reading still needs a cartridge");
+        assert!(rx.try_recv().is_err());
     }
 
     #[test]
