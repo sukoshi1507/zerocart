@@ -165,7 +165,6 @@ pub fn render(p: &mut Painter, v: &View) {
 
     let tab_hint = loc!(lang, fr: "onglet", en: "tab", ja: "タブ", zh: "标签");
     let quit_hint = loc!(lang, fr: "quitter", en: "quit", ja: "終了", zh: "退出");
-    let no_voltage = v.reader.is_some_and(|r| r.voltage.is_empty());
     let hints: Vec<(&str, &str)> = match (v.tab, v.progress.is_some()) {
         (_, true) => vec![("Esc", loc!(lang, fr: "annuler", en: "cancel", ja: "中止", zh: "取消"))],
         (Tab::Tools, _) => vec![
@@ -182,14 +181,7 @@ pub fn render(p: &mut Painter, v: &View) {
         ],
         _ => vec![
             ("Z C", tab_hint),
-            ("R", match no_voltage {
-                true => loc!(lang, fr: "lire GBA", en: "read GBA", ja: "GBA読出", zh: "读GBA"),
-                false => loc!(lang, fr: "lire GBA 3,3V", en: "read GBA 3.3V", ja: "GBA読出 3.3V", zh: "读GBA 3.3V"),
-            }),
-            ("G", match no_voltage {
-                true => loc!(lang, fr: "lire GB", en: "read GB", ja: "GB読出", zh: "读GB"),
-                false => loc!(lang, fr: "lire GB 5V", en: "read GB 5V", ja: "GB読出 5V", zh: "读GB 5V"),
-            }),
+            ("R", loc!(lang, fr: "lire", en: "read", ja: "読出", zh: "读取")),
             ("Esc", quit_hint),
         ],
     };
