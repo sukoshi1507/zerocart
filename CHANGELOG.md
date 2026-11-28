@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.2.3
+
+- Mega Drive flash: fixes cartridges that failed the verification at the end and were left with a blank boot block (no header, no vectors, not bootable). On some chips (seen on a Macronix one: eight 8 KiB boot sectors) erasing one small sector erases the whole 64 KiB boot block, so the sectors written one by one were wiped by the next erase and only the last one survived. After the sector loop the small sectors are now checked again and mended: erased first, programmed after. The mending is reported as one retry. Found by flashing `blacktiger_MD_v2.0.1.bin` on a cartridge that no longer worked since the serial mode.
+
 ## 1.2.2
 
 - Game Boy / Color and GBA: same as the Mega Drive in 1.2.1. A cartridge without a readable header (blank, or erased by a failed flash) can be flashed by hand and its flash chip analysed: the system comes from the mode chosen at the start (a Game Boy cartridge is taken as an MBC5 one, the only mapper that can be flashed), and the flash code identifies the chip itself. The banner says that flashing is still possible.

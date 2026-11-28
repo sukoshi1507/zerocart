@@ -653,6 +653,42 @@ impl<T: Transport> FlashKit<T> {
                 report.rewritten += 1;
                 progress("done", i + 1, used.len());
             }
+            // Some cartridges erase the whole 64 KiB boot block when one of its small sectors is erased (seen on a
+            // Macronix chip: eight 8 KiB sectors, erasing the n-th also cleared the ones before it). The sectors were
+            // each verified right after being written, then wiped by the next erase: only the last one survived. So the
+            // small sectors are looked at again, and mended by erasing first and programming after, so that no erase
+            // comes between a program and the end.
+            let biggest = used.iter().map(|s| s.1).max().unwrap_or(0);
+            let small: Vec<(u32, u32)> = used.iter().copied().filter(|s| s.1 < biggest).collect();
+            let mut broken = Vec::new();
+            for &(off, size) in &small {
+                if self.read(off, size as usize)? != target(off, size) {
+                    broken.push((off, size));
+                }
+            }
+            if !broken.is_empty() {
+                progress("boot sectors wiped by a neighbour's erase: mending", used.len(), used.len());
+                for &(off, size) in &small {
+                    let (cur, want) = (self.read(off, size as usize)?, target(off, size));
+                    // programming only clears bits: a sector that needs a bit set again must be erased
+                    if cur != want && cur.iter().zip(&want).any(|(c, w)| c & w != *w) {
+                        self.erase_sector(off)?;
+                    }
+                }
+                for &(off, size) in &small {
+                    let want = target(off, size);
+                    if self.read(off, size as usize)? == want {
+                        continue;
+                    }
+                    if want.iter().any(|&b| b != 0xFF) {
+                        self.program_sector(off, &want, geometry.buffer_bytes, true)?;
+                    }
+                    if self.read(off, size as usize)? != want {
+                        return Err(invalid("a boot sector still differs after being mended"));
+                    }
+                }
+                report.retried += 1;
+            }
             Ok(())
         })();
         if result.is_err() {
@@ -1354,6 +1390,26 @@ mod tests {
         assert_eq!(s.rom[0x30000..], game()[0x30000..], "sectors beyond the image are not touched");
         assert_eq!(s.chip, Chip::Array);
         assert_eq!(steps.last().unwrap(), &("done".to_string(), 3, 3));
+    }
+
+    #[test]
+    fn small_boot_sectors_that_are_wiped_together_by_one_erase_are_mended() {
+        // eight 8 KiB sectors then 64 KiB ones; the simulated chip erases 64 KiB blocks, like the cartridge that wiped
+        // the whole boot block when any of its small sectors was erased
+        let mut sectors: Vec<(u32, u32)> = (0..8).map(|i| (i * 0x2000, 0x2000)).collect();
+        sectors.extend((1..8).map(|i| (i * 0x10000, 0x10000)));
+        let mut k = flash_kit();
+        let mut g = k.read_geometry().unwrap().unwrap();
+        g.sectors = sectors;
+        let mut image = game();
+        for b in image[..0x10000].iter_mut().skip(0x300).step_by(7) {
+            *b ^= 0xFF; // every small sector differs from what the cartridge holds
+        }
+        let r = k.flash_rom(&g, &image, &mut |_, _, _| {}, &|| false).unwrap();
+        assert!(r.retried >= 1, "the mending pass ran: {r:?}");
+        let s = k.into_inner();
+        assert_eq!(s.rom, image, "the whole cartridge, boot block included, holds the image");
+        assert_eq!(s.chip, Chip::Array);
     }
 
     #[test]
