@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.2.2
+
+- Game Boy / Color and GBA: same as the Mega Drive in 1.2.1. A cartridge without a readable header (blank, or erased by a failed flash) can be flashed by hand and its flash chip analysed: the system comes from the mode chosen at the start (a Game Boy cartridge is taken as an MBC5 one, the only mapper that can be flashed), and the flash code identifies the chip itself. The banner says that flashing is still possible.
+- After a flash, the cartridge is read again in the right mode even when it has no header (it used to fall back to Game Boy mode).
+
 ## 1.2.1
 
 - Mega Drive: a cartridge without a SEGA header (blank, or erased by a failed flash) can be flashed by hand again. "Flash ROM" no longer wants a header, only that the flash chip answers (it says so when it does not), and the Tools tab analyses the chip without a header too. The banner now says that flashing is still possible. Reading still needs a cartridge.

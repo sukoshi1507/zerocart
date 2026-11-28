@@ -470,10 +470,6 @@ impl App {
         if self.analysing {
             return;
         }
-        if self.cart.is_none() && self.system != System::MegaDrive {
-            self.banner = Some((no_cartridge(self.lang).into(), true));
-            return;
-        }
         self.banner = None;
         self.analysing = true;
         self.analysis = None;
@@ -485,15 +481,15 @@ impl App {
         let action = Action::ALL[self.action_sel];
         let lang = self.lang;
         let md = self.system == System::MegaDrive;
-        // A blank (or failed) Mega Drive flash cartridge has no SEGA header, which is no reason to refuse a flash: the
-        // worker looks at the chip itself and says so when none answers.
-        if self.cart.is_none() && !(md && action == Action::FlashRom) {
+        // A blank (or failed) flash cartridge has no header, which is no reason to refuse a flash: the worker looks at
+        // the chip itself and says so when none answers.
+        if self.cart.is_none() && action != Action::FlashRom {
             self.banner = Some((no_cartridge(lang).into(), true));
             return;
         }
         self.banner = None;
         if action.writes() {
-            let gba = self.cart.as_ref().is_some_and(|c| c.system == "GBA");
+            let gba = self.cart.as_ref().map_or(self.system == System::Gba, |c| c.system == "GBA");
             let exts: &[&str] = match action {
                 Action::FlashRom if md => &["bin", "md", "gen"],
                 Action::WriteSave if md => &["sav", "srm"],
@@ -595,16 +591,16 @@ impl App {
                             zh: "没有SEGA文件头（空白卡带？）：仍可烧录")
                     } else if !self.dmg() {
                         loc!(lang,
-                            fr: "Pas de cartouche GBA : est-ce une Game Boy ? (Échap : changer)",
-                            en: "No GBA cartridge: is it a Game Boy one? (Esc: change)",
-                            ja: "GBAカートがありません。Game Boyでは？（Esc：変更）",
-                            zh: "没有GBA卡带：是Game Boy卡带吗？（Esc：更换）")
+                            fr: "Pas de cartouche GBA reconnue : est-ce une Game Boy ? (Échap : changer ; le flash reste possible)",
+                            en: "No GBA cartridge recognised: is it a Game Boy one? (Esc: change; flashing is still possible)",
+                            ja: "GBAカートを認識できません。Game Boyでは？（Esc：変更／書き込みは可能）",
+                            zh: "未识别到GBA卡带：是Game Boy卡带吗？（Esc：更换／仍可烧录）")
                     } else {
                         loc!(lang,
-                            fr: "Pas de cartouche Game Boy : est-ce une GBA ? (Échap : changer)",
-                            en: "No Game Boy cartridge: is it a GBA one? (Esc: change)",
-                            ja: "Game Boyカートがありません。GBAでは？（Esc：変更）",
-                            zh: "没有Game Boy卡带：是GBA卡带吗？（Esc：更换）")
+                            fr: "Pas de cartouche Game Boy reconnue : est-ce une GBA ? (Échap : changer ; le flash reste possible)",
+                            en: "No Game Boy cartridge recognised: is it a GBA one? (Esc: change; flashing is still possible)",
+                            ja: "Game Boyカートを認識できません。GBAでは？（Esc：変更／書き込みは可能）",
+                            zh: "未识别到Game Boy卡带：是GBA卡带吗？（Esc：更换／仍可烧录）")
                     };
                     self.banner = Some((text.into(), true));
                 }
@@ -937,12 +933,12 @@ mod tests {
     fn no_cartridge_says_what_to_check_instead_of_waiting_silently() {
         let (mut a, _rx) = app(); // GBA
         a.on_event(Event::Detected(Ok((reader(), None))));
-        assert_eq!(a.banner, Some(("Pas de cartouche GBA : est-ce une Game Boy ? (Échap : changer)".into(), true)));
+        assert_eq!(a.banner, Some(("Pas de cartouche GBA reconnue : est-ce une Game Boy ? (Échap : changer ; le flash reste possible)".into(), true)));
         let (tx, _rx2) = channel();
         let mut b = App::new(Lang::Fr, tx, Arc::new(AtomicBool::new(false)), std::env::temp_dir());
         b.enter_main(System::Gb);
         b.on_event(Event::Detected(Ok((reader(), None))));
-        assert_eq!(b.banner, Some(("Pas de cartouche Game Boy : est-ce une GBA ? (Échap : changer)".into(), true)));
+        assert_eq!(b.banner, Some(("Pas de cartouche Game Boy reconnue : est-ce une GBA ? (Échap : changer ; le flash reste possible)".into(), true)));
         // a cartridge found clears the message
         b.on_event(Event::Detected(Ok((reader(), Some(cart())))));
         assert!(b.cart.is_some() && b.banner.is_none());
@@ -1469,13 +1465,33 @@ mod tests {
         rx.try_recv().unwrap();
         a.tab = Tab::Tools;
         down(&mut a, Key::Enter);
-        assert!(rx.try_recv().is_err() && a.banner.as_ref().unwrap().1);
+        assert!(matches!(rx.try_recv().unwrap(), Cmd::Analyze), "a blank cartridge has no header: the chip is analysed anyway");
+        a.on_event(Event::Analysis(Err("aucune cartouche".into())));
+        assert!(a.analysing == false);
         a.on_event(Event::Detected(Ok((reader(), Some(cart())))));
         down(&mut a, Key::Enter);
         rx.try_recv().unwrap();
         a.on_event(Event::Analysis(Err("lecteur déconnecté".into())));
         assert!(!a.analysing && a.analysis.is_none());
         assert_eq!(a.banner, Some(("lecteur déconnecté".into(), true)));
+    }
+
+    #[test]
+    fn a_blank_gb_or_gba_cartridge_can_be_flashed_without_a_header_in_the_system_s_mode() {
+        for (system, gba) in [(System::Gba, true), (System::Gb, false)] {
+            let d = tempfile::tempdir().unwrap();
+            std::fs::write(d.path().join(if gba { "g.gba" } else { "g.gb" }), vec![0u8; 2048]).unwrap();
+            let (tx, rx) = channel();
+            let mut a = App::new(Lang::En, tx, Arc::new(AtomicBool::new(false)), d.path().to_path_buf());
+            a.enter_main(system);
+            rx.try_recv().unwrap();
+            a.on_event(Event::Detected(Ok((reader(), None))));
+            a.tab = Tab::Actions;
+            a.action_sel = Action::ALL.iter().position(|x| *x == Action::FlashRom).unwrap();
+            down(&mut a, Key::Enter);
+            assert!(matches!(a.flow, Flow::Picking { .. }), "{system:?}: the ROM list opens although there is no header");
+            assert_eq!(a.flow_gba, gba);
+        }
     }
 
     #[test]

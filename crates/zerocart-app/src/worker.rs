@@ -64,6 +64,17 @@ struct MdState {
     upper: Option<bool>,
 }
 
+/// The cartridge taken as blank: no header to read, so the system comes from the mode, a Game Boy cartridge is taken as
+/// an MBC5 one (the only mapper that can be flashed) and its title from the ROM about to be written.
+fn blank_cart(dmg: bool, rom: Option<&Path>) -> Cart {
+    if dmg {
+        let title = rom.and_then(|p| std::fs::read(p).ok()).and_then(|r| parse_dmg(&r).map(|h| h.title)).unwrap_or_default();
+        Cart { mode: CartMode::Dmg, entry: None, rom_size: 0, title, dmg: Some((Some(DmgMapper::Mbc5), 0)), ram_size: 0 }
+    } else {
+        Cart { mode: CartMode::Agb, entry: None, rom_size: 0, title: String::new(), dmg: None, ram_size: 0 }
+    }
+}
+
 /// What the worker knows about the inserted cartridge.
 struct Cart {
     mode: CartMode,
@@ -161,6 +172,8 @@ impl Worker {
         let mut dev: Option<Dev> = None;
         let mut cart: Option<Cart> = None;
         let mut kind: Option<zerocart_core::ReaderKind> = None;
+        // The mode of the last look at the cartridge: a blank one has no header to say which system it is.
+        let mut dmg_mode = true;
         // The Krikzz Mega Drive programmer is not a CartReader: it has its own state and commands.
         let mut md: Option<MdState> = None;
         while let Ok(cmd) = rx.recv() {
@@ -217,25 +230,34 @@ impl Worker {
                     kind = None;
                 }
                 Cmd::Analyze => {
-                    let r = match (dev.as_mut(), cart.as_ref()) {
-                        (Some(d), Some(c)) => self.analyze(d, c),
-                        _ => Err(msg::no_cartridge(self.lang())),
+                    // a blank cartridge has no header: the chip is what is looked at
+                    let r = match dev.as_mut() {
+                        Some(d) => match cart.as_ref() {
+                            Some(c) => self.analyze(d, c),
+                            None => self.analyze(d, &blank_cart(dmg_mode, None)),
+                        },
+                        None => Err(msg::no_cartridge(self.lang())),
                     };
                     let _ = tx.send(Event::Analysis(r));
                 }
                 Cmd::FlashRom(path, backup) => {
-                    let r = match (dev.as_mut(), cart.as_ref()) {
-                        (Some(d), Some(c)) => self.flash_rom(d, c, &path, backup, &tx),
-                        _ => Err(msg::no_cartridge(self.lang())),
+                    // A blank cartridge (or one a failed flash left blank) has no header: flashing only needs the chip
+                    // to answer, and the flash code looks at it itself. A Game Boy cartridge is taken as an MBC5 one.
+                    let r = match dev.as_mut() {
+                        Some(d) => match cart.as_ref() {
+                            Some(c) => self.flash_rom(d, c, &path, backup, &tx),
+                            None => self.flash_rom(d, &blank_cart(dmg_mode, Some(&path)), &path, backup, &tx),
+                        },
+                        None => Err(msg::no_cartridge(self.lang())),
                     };
-                    self.after_write(&mut dev, kind, &mut cart, r, &tx);
+                    self.after_write(&mut dev, kind, &mut cart, dmg_mode, r, &tx);
                 }
                 Cmd::WriteSave(path) => {
                     let r = match (dev.as_mut(), cart.as_ref()) {
                         (Some(d), Some(c)) => self.write_save(d, c, &path, &tx),
                         _ => Err(msg::no_cartridge(self.lang())),
                     };
-                    self.after_write(&mut dev, kind, &mut cart, r, &tx);
+                    self.after_write(&mut dev, kind, &mut cart, dmg_mode, r, &tx);
                 }
                 Cmd::BatchFlash { path, dmg } => {
                     let r = self.batch_run(&mut dev, kind, &path, dmg, &tx);
@@ -248,6 +270,7 @@ impl Worker {
                     return;
                 }
                 Cmd::Detect { dmg } => {
+                    dmg_mode = dmg;
                     let r = self.detect(&mut dev, kind, dmg);
                     let _ = tx.send(Event::Detected(r.map(|(rv, c)| {
                         let view = c.as_ref().map(|(v, _)| v.clone());
@@ -659,19 +682,12 @@ impl Worker {
     /// Serial flash mode: the cartridge is taken as blank (no backup). A Game Boy cartridge is taken as an MBC5 one,
     /// the only mapper that can be flashed, since a blank chip has no header to say so.
     fn batch_flash(&self, d: &mut Dev, path: &Path, dmg: bool, tx: &Sender<Event>) -> Result<String, String> {
-        let rom = std::fs::read(path).map_err(|e| e.to_string())?;
-        let cart = if dmg {
-            let title = parse_dmg(&rom).map(|h| h.title).unwrap_or_default();
-            Cart { mode: CartMode::Dmg, entry: None, rom_size: rom.len(), title, dmg: Some((Some(DmgMapper::Mbc5), 0)), ram_size: 0 }
-        } else {
-            Cart { mode: CartMode::Agb, entry: None, rom_size: rom.len(), title: String::new(), dmg: None, ram_size: 0 }
-        };
+        let cart = blank_cart(dmg, Some(path));
         self.flash_rom(d, &cart, path, false, tx)
     }
 
     /// After a write the cartridge may have changed: identify it again, then report the result.
-    fn after_write(&self, dev: &mut Option<Dev>, kind: Option<zerocart_core::ReaderKind>, cart: &mut Option<Cart>, result: Result<String, String>, tx: &Sender<Event>) {
-        let dmg = cart.as_ref().is_none_or(|c| c.mode == CartMode::Dmg);
+    fn after_write(&self, dev: &mut Option<Dev>, kind: Option<zerocart_core::ReaderKind>, cart: &mut Option<Cart>, dmg: bool, result: Result<String, String>, tx: &Sender<Event>) {
         if let Ok((reader, found)) = self.detect(dev, kind, dmg) {
             let view = found.as_ref().map(|(v, _)| v.clone());
             *cart = found.map(|(_, c)| c);
