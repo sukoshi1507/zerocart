@@ -139,7 +139,7 @@ fn demo_png(args: &[String], out: &str, lang: Lang, fonts: &Fonts) -> Result<(),
                 let t_ms = arg(args, "--t").and_then(|s| s.parse().ok()).unwrap_or(1500);
                 render_batch(&mut p, &BatchView {
                     lang, phase, files: &files, selected: sel, file: "Vampire Killer.gba", ok: 11, failed: 1, last_secs: Some(94),
-                    progress: Some(&pr), message: (phase == BatchPhase::Eject { ok: false }).then_some(("Vérification : différences", true)), t_ms,
+                    progress: Some(&pr), message: (phase == BatchPhase::Eject { ok: false }).then_some(("Vérif : 12 octet(s) faux, 1er en 0x1A2B3C (attendu 4E, lu 4F) ; 2e lecture différente : contact ?", true)), t_ms,
                 });
                 true
             }

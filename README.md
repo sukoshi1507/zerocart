@@ -47,15 +47,14 @@ and the Pocket Camera.
 ## Serial flash mode
 
 For flashing many blank cartridges with the same ROM. On the system screen, put the cursor on a system and press `I`
-(instead of Enter), choose the reader, then the ROM from `~/zerocart`. From there the operator only follows the
-screen and the sounds: a *ding* asks for a cartridge, a *ding ding* says it was recognised and the work starts (erase,
-write, read back; **no backup**), a fanfare says to eject it (a low buzz if it
-failed, the screen then says why), and the next *ding* comes as soon as the connector is empty. `Enter` goes on to
-the next cartridge if a quick swap went unnoticed, `Esc` stops (not while a cartridge is being written). The jingles
-need `aplay` (package `alsa-utils`); `--no-sound` turns them off. Cartridges are recognised by their flash chip
-answering, so a cartridge that is not a flash one is simply never started. What is on the cartridge is never looked at: a
-blank one and one already flashed (a test cartridge, say) are treated the same and overwritten without a question. This
-mode is at the user's own risk.
+(instead of Enter), choose the reader, then the ROM from `~/zerocart`. Then, for each cartridge: put it in, push it all
+the way, press `Enter`. ZeroCart looks for the flash chip (a cartridge whose chip does not answer is not touched, the
+screen says so and `Enter` tries again), then erases, writes and verifies (**no backup**). A fanfare says it is good, a
+low buzz says it failed, and the screen gives the reason (for a Mega Drive verification: how many bytes differ, where, and
+whether a second read gives the same bytes, which separates a bad write from a bad contact). `Enter` on that verdict goes
+on to the next cartridge, `R` tries a failed one again, `Esc` stops (not while a cartridge is being written). The jingles
+need `aplay` (package `alsa-utils`); `--no-sound` turns them off. What is on the cartridge is never looked at: a blank
+one and one already flashed are overwritten without a question. This mode is at the user's own risk.
 
 ## Sharing with ZeroSend
 

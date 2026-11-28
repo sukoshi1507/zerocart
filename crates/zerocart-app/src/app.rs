@@ -164,8 +164,6 @@ impl App {
                 self.dirty = true;
             }
             self.anim_ms = ms;
-            let out = self.batch.as_mut().map(|b| b.tick(now)).unwrap_or_default();
-            self.batch_out(out);
         }
         if matches!(self.flow, Flow::Confirming { no_backup: true, .. }) {
             let since = *self.raster_since.get_or_insert(now);
@@ -323,7 +321,7 @@ impl App {
                 }
             }
             (Stage::Batch, k) => {
-                let out = self.batch.as_mut().map(|b| b.key(k)).unwrap_or_default();
+                let out = self.batch.as_mut().map(|b| b.key(k, Instant::now())).unwrap_or_default();
                 self.batch_out(out);
             }
             (Stage::System, Key::Char('s' | 'S')) => self.open_share(),
@@ -636,8 +634,9 @@ impl App {
                 self.reader = None;
                 self.banner = Some((msg, true));
             }
-            Event::BatchProbe(r) => {
-                let out = self.batch.as_mut().map(|b| b.probe_result(r, Instant::now())).unwrap_or_default();
+            Event::BatchSkipped(why) => {
+                self.progress = None;
+                let out = self.batch.as_mut().map(|b| b.skipped(why)).unwrap_or_default();
                 self.batch_out(out);
             }
             Event::BatchResult(r) => {
@@ -1526,10 +1525,9 @@ mod tests {
         assert!(rx.try_recv().is_err(), "no cartridge is read: a blank one has no header");
         down(&mut a, Key::Enter); // the only ROM
         assert_eq!(*heard.borrow(), vec![Jingle::Insert]);
-        let t = Instant::now();
-        a.tick(t);
-        assert!(matches!(rx.try_recv().unwrap(), Cmd::BatchProbe { dmg: false }));
-        a.on_event(Event::BatchProbe(Ok(true)));
+        a.tick(Instant::now());
+        assert!(rx.try_recv().is_err(), "nothing is looked for until Enter");
+        down(&mut a, Key::Enter); // cartridge in: go
         assert_eq!(*heard.borrow(), vec![Jingle::Insert, Jingle::Detected]);
         match rx.try_recv().unwrap() {
             Cmd::BatchFlash { path, dmg } => assert_eq!((path.file_name().unwrap().to_str().unwrap(), dmg), ("game.gba", false)),
@@ -1539,10 +1537,12 @@ mod tests {
         assert_eq!(a.stage, Stage::Batch, "a cartridge being written is not abandoned");
         a.on_event(Event::BatchResult(Ok("done".into())));
         assert_eq!(heard.borrow().last(), Some(&Jingle::Done));
-        a.tick(t + Duration::from_secs(2));
-        assert!(matches!(rx.try_recv().unwrap(), Cmd::BatchProbe { .. }));
-        a.on_event(Event::BatchProbe(Ok(false))); // taken out
-        assert_eq!(heard.borrow().last(), Some(&Jingle::Insert));
+        down(&mut a, Key::Enter); // next cartridge
+        assert!(rx.try_recv().is_err(), "Enter on the verdict only goes back to the insert screen");
+        down(&mut a, Key::Enter);
+        assert!(matches!(rx.try_recv().unwrap(), Cmd::BatchFlash { .. }));
+        a.on_event(Event::BatchSkipped("no chip".into()));
+        assert_eq!(heard.borrow().last(), Some(&Jingle::Error));
         down(&mut a, Key::Esc);
         assert_eq!(a.stage, Stage::Readers);
         assert!(matches!(rx.try_recv().unwrap(), Cmd::Disconnect));

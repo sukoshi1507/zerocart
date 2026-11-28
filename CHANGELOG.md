@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.2.0
+
+- Serial flash mode, new process: no more automatic detection of the cartridge. You put it in, press `Enter`, and ZeroCart looks for the chip, erases, writes and verifies; the verdict stays on screen until `Enter` goes on to the next cartridge (`R` retries a failed one). The connector is no longer polled while waiting (it powered the cartridge on and off every second, and started the write as soon as the chip answered, possibly before the cartridge was fully in).
+- A cartridge whose chip does not answer is not touched: the screen says so and `Enter` tries again, without counting a failure.
+- Mega Drive: a failed verification now says how many bytes differ, the first address with the expected and the read value, and whether a second read gives the same bytes (bad write) or others (bad contact). If the second read is right, the cartridge is counted as good and the message warns about the contact.
+
 ## 1.1.1
 
 - The footer of the main screen offers a single `R` read action. It used to list "read GB" and "read GBA" whatever the reader (the MD Flasher included), although the system is chosen at the start and `G` does nothing.

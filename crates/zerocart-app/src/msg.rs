@@ -119,6 +119,34 @@ pub fn written_mismatch(l: Lang, name: Option<&str>) -> String {
         zh: "ROM已写入，但回读结果不一致");
     format!("{head} ; {}", old_rom_tail(l, name))
 }
+/// The read-back of a Mega Drive flash differs: how many bytes, where, what was expected, and whether a second read
+/// gives the same bytes (a stable difference is a bad write, an unstable one a bad contact).
+pub fn written_diff_detail(l: Lang, count: usize, first: usize, want: u8, got: u8, stable: bool) -> String {
+    let verdict = if stable {
+        loc!(l, fr: "2e lecture identique : écriture", en: "2nd read same: bad write", ja: "再読込も同じ：書込不良", zh: "再读相同：写入有误")
+    } else {
+        loc!(l, fr: "2e lecture différente : contact ?", en: "2nd read differs: contact?", ja: "再読込は異なる：接触？", zh: "再读不同：接触？")
+    };
+    loc!(l,
+        fr: format!("Vérif : {count} octet(s) faux, 1er en 0x{first:X} (attendu {want:02X}, lu {got:02X}) ; {verdict}"),
+        en: format!("Verify: {count} byte(s) wrong, first at 0x{first:X} (want {want:02X}, got {got:02X}); {verdict}"),
+        ja: format!("検証：{count}バイト不一致、先頭 0x{first:X}（期待 {want:02X}、読出 {got:02X}）；{verdict}"),
+        zh: format!("验证：{count}字节不同，首个在0x{first:X}（应为{want:02X}，读到{got:02X}）；{verdict}"))
+}
+pub fn written_reread_ok(l: Lang, first: usize, count: usize) -> String {
+    loc!(l,
+        fr: format!("ROM écrite et vérifiée (la 1re relecture avait {count} octet(s) faux dès 0x{first:X} : contact à surveiller)"),
+        en: format!("ROM written and verified (the 1st read-back had {count} wrong byte(s) from 0x{first:X}: check the contact)"),
+        ja: format!("ROMを書き込み検証しました（最初の読戻しで0x{first:X}から{count}バイト誤り：接触を確認）"),
+        zh: format!("ROM已写入并验证（首次回读自0x{first:X}起有{count}字节错误：请检查接触）"))
+}
+pub fn batch_no_chip(l: Lang) -> String {
+    loc!(l,
+        fr: "Aucune puce flash ne répond : cartouche mal enfoncée ou non flashable ? (Entrée : réessayer)",
+        en: "No flash chip answers: cartridge not pushed in, or not a flash one? (Enter: try again)",
+        ja: "フラッシュチップが応答しません：挿入不良か非対応？（Enter：再試行）",
+        zh: "没有闪存芯片响应：未插到位或非闪存卡带？（Enter：重试）").into()
+}
 pub fn verifying(l: Lang) -> String {
     loc!(l, fr: "Vérification de l'écriture", en: "Verifying the write", ja: "書き込みを検証中", zh: "正在验证写入").into()
 }

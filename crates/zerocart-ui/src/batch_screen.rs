@@ -45,8 +45,8 @@ const SCROLL_H: i32 = 30;
 const X0: i32 = INSET + 2;
 const W: i32 = INNER_W - 4;
 
-const SCROLL_TEXT: &str = "   *** ZEROCART SERIAL FLASH ***   INSERT A CARTRIDGE - WAIT FOR THE DING - \
-    WAIT FOR THE SECOND DING - EJECT - NEXT !   NO BACKUP, NO MERCY, BLANK CARTRIDGES ONLY   \
+const SCROLL_TEXT: &str = "   *** ZEROCART SERIAL FLASH ***   INSERT A CARTRIDGE - PRESS ENTER - \
+    WAIT FOR THE VERDICT - EJECT - NEXT !   NO BACKUP, NO MERCY, BLANK CARTRIDGES ONLY   \
     KEEP THE PACE, KEEP THE FLASH   *** ZEROSTACK ***   ";
 
 /// The intensity (0..=255) of a copper bar `dy` lines from its middle, `half` lines to each side: a bright core
@@ -179,19 +179,20 @@ fn centered(p: &mut Painter, s: &str, px: u32, color: Rgb, y: i32) {
     p.text_centered(s, px, false, color, X0, y, W, px as i32 + 4);
 }
 
-fn counters(p: &mut Painter, v: &BatchView, y: i32) {
+/// "OK 11  FAILED 1  1:34", shown in the title bar once a ROM is chosen.
+fn counters(v: &BatchView) -> String {
     let l = v.lang;
     let mut s = format!(
-        "{} {}   {} {}",
+        "{} {}  {} {}",
         loc!(l, fr: "OK", en: "OK", ja: "成功", zh: "成功"),
         v.ok,
         loc!(l, fr: "ÉCHEC", en: "FAILED", ja: "失敗", zh: "失败"),
         v.failed
     );
     if let Some(secs) = v.last_secs {
-        s.push_str(&format!("   {}:{:02}", secs / 60, secs % 60));
+        s.push_str(&format!("  {}:{:02}", secs / 60, secs % 60));
     }
-    centered(p, &s, 10, if v.failed > 0 { WARNING } else { DIM }, y);
+    s
 }
 
 fn picker(p: &mut Painter, v: &BatchView) {
@@ -238,7 +239,12 @@ pub fn render_batch(p: &mut Painter, v: &BatchView) {
     let t = t_ms as f32 / 1000.0;
     p.canvas.fill_rect(0, 0, crate::SCREEN_W, crate::SCREEN_H, BACKGROUND);
     p.frame();
-    p.bar("ZEROCART", loc!(l, fr: "mode série", en: "serial mode", ja: "連続書込", zh: "连续烧录"), None);
+    let title_right = if v.phase == BatchPhase::Pick {
+        loc!(l, fr: "mode série", en: "serial mode", ja: "連続書込", zh: "连续烧录").to_string()
+    } else {
+        counters(v)
+    };
+    p.bar("ZEROCART", &title_right, None);
     copper_band(p, t);
     let n = v.ok + v.failed + u32::from(v.phase != BatchPhase::Pick && !matches!(v.phase, BatchPhase::Eject { .. }));
     let sub = match v.phase {
@@ -252,9 +258,8 @@ pub fn render_batch(p: &mut Painter, v: &BatchView) {
         BatchPhase::Insert => {
             headline(p, loc!(l, fr: "METTEZ UNE CARTOUCHE", en: "INSERT A CARTRIDGE", ja: "カートを挿入", zh: "请插入卡带"), PRIMARY, STATUS_TOP, t_ms, true);
             if v.message.is_none() {
-                centered(p, loc!(l, fr: "elle sera reconnue toute seule", en: "it is recognised by itself", ja: "自動で認識します", zh: "会自动识别"), 10, DIM, STATUS_TOP + 20);
+                centered(p, loc!(l, fr: "bien enfoncée, puis Entrée", en: "pushed all the way in, then Enter", ja: "奥まで挿して Enter", zh: "插到底后按 Enter"), 10, DIM, STATUS_TOP + 20);
             }
-            counters(p, v, STATUS_TOP + 33);
         }
         BatchPhase::Flashing => flashing(p, v, t_ms),
         BatchPhase::Eject { ok } => {
@@ -263,32 +268,31 @@ pub fn render_batch(p: &mut Painter, v: &BatchView) {
             } else {
                 headline(p, loc!(l, fr: "ÉCHEC - ÉJECTEZ", en: "FAILED - EJECT", ja: "失敗 - 取り出して", zh: "失败 - 请取出"), ERROR, STATUS_TOP, t_ms, true);
             }
-            counters(p, v, STATUS_TOP + 22);
         }
     }
-    if let Some((m, err)) = v.message {
-        if v.phase != BatchPhase::Pick {
-            let y = match v.phase {
-                BatchPhase::Insert => STATUS_TOP + 20,
-                _ => STATUS_TOP + 35,
-            };
-            if v.phase != BatchPhase::Flashing {
-                p.text_centered(m, 9, false, if err { ERROR } else { DIM }, X0 + 4, y, W - 8, 12);
-            }
-        }
-    }
-
     starfield(p, t_ms);
     scroller(p, t_ms);
+    if let Some((m, err)) = v.message {
+        if !matches!(v.phase, BatchPhase::Pick | BatchPhase::Flashing) {
+            p.paragraph(m, 9, false, if err { ERROR } else { DIM }, X0 + 4, STATUS_TOP + 19, W - 8);
+        }
+    }
 
     let hints: Vec<(&str, &str)> = match v.phase {
         BatchPhase::Pick => vec![("F X", crate::loc::word::pick(l)), ("Enter", crate::loc::word::confirm(l)), ("Esc", crate::loc::word::back(l))],
-        BatchPhase::Insert => vec![("Esc", loc!(l, fr: "arrêter", en: "stop", ja: "停止", zh: "停止"))],
-        BatchPhase::Flashing => vec![],
-        BatchPhase::Eject { .. } => vec![
-            ("Enter", loc!(l, fr: "suivante", en: "next", ja: "次へ", zh: "下一个")),
+        BatchPhase::Insert => vec![
+            ("Enter", loc!(l, fr: "flasher", en: "flash", ja: "書込", zh: "烧录")),
             ("Esc", loc!(l, fr: "arrêter", en: "stop", ja: "停止", zh: "停止")),
         ],
+        BatchPhase::Flashing => vec![],
+        BatchPhase::Eject { ok } => {
+            let mut h = vec![("Enter", loc!(l, fr: "suivante", en: "next", ja: "次へ", zh: "下一个"))];
+            if !ok {
+                h.push(("R", loc!(l, fr: "réessayer", en: "retry", ja: "再試行", zh: "重试")));
+            }
+            h.push(("Esc", loc!(l, fr: "arrêter", en: "stop", ja: "停止", zh: "停止")));
+            h
+        }
     };
     if v.phase == BatchPhase::Flashing {
         p.footer(&[], Some((loc!(l, fr: "Ne pas débrancher.", en: "Do not unplug.", ja: "抜かないでください。", zh: "请勿拔出。"), false)));

@@ -33,9 +33,6 @@ pub enum Cmd {
     FlashRom(PathBuf, bool),
     /// Game Boy: write the save file to the cartridge RAM (the current save is backed up first, if it is stable).
     WriteSave(PathBuf),
-    /// Serial flash mode: is a flash cartridge (blank or not) in the reader? Answered by `Event::BatchProbe`; the
-    /// reader is powered down again when there is none.
-    BatchProbe { dmg: bool },
     /// Serial flash mode: erase, write and verify the ROM on the cartridge, without a backup (the cartridges are
     /// blank), then power it down so that it can be taken out. Answered by `Event::BatchResult`.
     BatchFlash { path: PathBuf, dmg: bool },
@@ -53,7 +50,8 @@ pub enum Event {
     Analysis(Result<Vec<String>, String>),
     /// `Ok(true)`: a flash cartridge answers; `Ok(false)`: the connector is empty; `Err`: something is in it that must
     /// not be flashed in this mode (a Game Boy Advance cartridge while Game Boy was chosen).
-    BatchProbe(Result<bool, String>),
+    /// Serial flash mode: the cartridge was not started (no chip answers, wrong cartridge): nothing was touched
+    BatchSkipped(String),
     BatchResult(Result<String, String>),
 }
 
@@ -168,7 +166,7 @@ impl Worker {
         while let Ok(cmd) = rx.recv() {
             self.cancel.store(false, Ordering::SeqCst);
             if let Some(state) = md.as_mut() {
-                if matches!(cmd, Cmd::Detect { .. } | Cmd::ReadRom | Cmd::ReadSave | Cmd::Analyze | Cmd::FlashRom(..) | Cmd::WriteSave(_) | Cmd::BatchProbe { .. } | Cmd::BatchFlash { .. }) {
+                if matches!(cmd, Cmd::Detect { .. } | Cmd::ReadRom | Cmd::ReadSave | Cmd::Analyze | Cmd::FlashRom(..) | Cmd::WriteSave(_) | Cmd::BatchFlash { .. }) {
                     self.md_command(state, cmd, &tx);
                     continue;
                 }
@@ -239,19 +237,9 @@ impl Worker {
                     };
                     self.after_write(&mut dev, kind, &mut cart, r, &tx);
                 }
-                Cmd::BatchProbe { dmg } => {
-                    let r = self.batch_probe(&mut dev, kind, dmg);
-                    let _ = tx.send(Event::BatchProbe(r));
-                }
                 Cmd::BatchFlash { path, dmg } => {
-                    let r = match dev.as_mut() {
-                        Some(d) => self.batch_flash(d, &path, dmg, &tx),
-                        None => Err(msg::no_cartridge(self.lang())),
-                    };
-                    if let Some(mut d) = dev.take() {
-                        let _ = d.r().close(); // the cartridge is unpowered: it can be taken out
-                    }
-                    let _ = tx.send(Event::BatchResult(r));
+                    let r = self.batch_run(&mut dev, kind, &path, dmg, &tx);
+                    let _ = tx.send(r);
                 }
                 Cmd::Quit => {
                     if let Some(d) = dev.as_mut() {
@@ -326,14 +314,18 @@ impl Worker {
                 let r = self.md_write_save(md, &path, tx);
                 let _ = tx.send(Event::Finished(r));
             }
-            Cmd::BatchProbe { .. } => {
-                let r = md.kit.read_geometry().map(|g| g.is_some()).map_err(|e| e.to_string());
-                let _ = tx.send(Event::BatchProbe(r));
-            }
-            Cmd::BatchFlash { path, .. } => {
-                let r = self.md_flash_rom(md, &path, false, tx);
-                let _ = tx.send(Event::BatchResult(r));
-            }
+            Cmd::BatchFlash { path, .. } => match md.kit.read_geometry() {
+                Ok(Some(_)) => {
+                    let r = self.md_flash_rom(md, &path, false, tx);
+                    let _ = tx.send(Event::BatchResult(r));
+                }
+                Ok(None) => {
+                    let _ = tx.send(Event::BatchSkipped(msg::batch_no_chip(self.lang())));
+                }
+                Err(e) => {
+                    let _ = tx.send(Event::BatchSkipped(e.to_string()));
+                }
+            },
             _ => {
                 let _ = tx.send(Event::Finished(Err(msg::md_save_write_unsupported(self.lang()))));
             }
@@ -474,10 +466,18 @@ impl Worker {
         let mut want = image.clone();
         want.resize(extent, 0xFF);
         if after == want {
-            Ok(msg::md_written_ok(l, report.rewritten, report.unchanged, name.as_deref()))
-        } else {
-            Err(msg::written_mismatch(l, name.as_deref()))
+            return Ok(msg::md_written_ok(l, report.rewritten, report.unchanged, name.as_deref()));
         }
+        // Say what differs: a second read tells a bad write (same bytes again) from a bad contact (other bytes).
+        let first = after.iter().zip(&want).position(|(a, w)| a != w).unwrap_or(0);
+        let count = after.iter().zip(&want).filter(|(a, w)| a != w).count();
+        let mut again = Vec::with_capacity(extent);
+        md.kit.dump_rom(extent, &mut again, &mut |_| true).map_err(|e| e.to_string())?;
+        if again == want {
+            return Ok(msg::written_reread_ok(l, first, count));
+        }
+        let (want_b, got_b) = (want[first], after[first]);
+        Err(msg::written_diff_detail(l, count, first, want_b, got_b, again == after))
     }
 
     /// Reads the "SEGA" header of the inserted cartridge. `None`: no valid Mega Drive header (empty connector, blank
@@ -613,21 +613,26 @@ impl Worker {
         Ok((Some(d), view))
     }
 
-    /// Serial flash mode: does a flash chip answer? A blank cartridge has no header, so the only proof of a cartridge is
-    /// the chip itself (its CFI table). The reader is kept open (and the cartridge powered) only when one answers.
-    fn batch_probe(&self, dev: &mut Option<Dev>, kind: Option<zerocart_core::ReaderKind>, dmg: bool) -> Result<bool, String> {
+    /// Serial flash mode, one cartridge: look for the flash chip (a blank cartridge has no header, so the chip answering
+    /// is the only proof of a cartridge), and only then erase, write and verify. Without an answer nothing is touched
+    /// and `BatchSkipped` says why. The cartridge is unpowered afterwards.
+    fn batch_run(&self, dev: &mut Option<Dev>, kind: Option<zerocart_core::ReaderKind>, path: &Path, dmg: bool, tx: &Sender<Event>) -> Event {
         let l = self.lang();
-        let mut d = match dev.take() {
-            Some(d) => d,
-            None => Dev::open_kind(kind.ok_or_else(|| msg::no_cartridge(l))?, l)?,
+        let opened = match dev.take() {
+            Some(d) => Ok(d),
+            None => kind.ok_or_else(|| msg::no_cartridge(l)).and_then(|k| Dev::open_kind(k, l)),
         };
-        let r = self.batch_check(&mut d, dmg);
-        if matches!(r, Ok(true)) {
-            *dev = Some(d);
-        } else {
-            let _ = d.r().close(); // nothing there (or not for us): leave the connector unpowered
-        }
-        r
+        let mut d = match opened {
+            Ok(d) => d,
+            Err(e) => return Event::BatchSkipped(e),
+        };
+        let event = match self.batch_check(&mut d, dmg) {
+            Ok(true) => Event::BatchResult(self.batch_flash(&mut d, path, dmg, tx)),
+            Ok(false) => Event::BatchSkipped(msg::batch_no_chip(l)),
+            Err(e) => Event::BatchSkipped(e),
+        };
+        let _ = d.r().close(); // the cartridge is unpowered: it can be taken out
+        event
     }
 
     fn batch_check(&self, d: &mut Dev, dmg: bool) -> Result<bool, String> {
